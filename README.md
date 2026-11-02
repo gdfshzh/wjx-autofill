@@ -798,7 +798,7 @@ if "结果 {'ok': True" in line:      # 老做法
 
 ```
 移动版完成页  ...completemobile2.aspx?activityid=xxx&joinactivity=128153311680
-PC 版        ...&joinid=<已脱敏>
+PC 版        ...&joinid=128153311680
 ```
 
 两种都认，拿不到编号一律降级为失败。之前只认 `joinid`，把移动版的成功全判成失败——
@@ -1033,7 +1033,7 @@ python selftest_survey_text.py
 
 ## 十六、Git 版本管理
 
-仓库已初始化，主分支 `main`，当前版本打了标签 `v1.2.0`。
+仓库已初始化，主分支 `main`，当前版本 **1.3.1**，标签 `v1.2.0` / `v1.3.0` / `v1.3.1`。
 
 ```bash
 git log --oneline --decorate
@@ -1043,7 +1043,7 @@ git diff
 
 ### 入库范围
 
-`git ls-files` 只包含源码、前端、文档和自检脚本，共 29 个文件。
+`git ls-files` 只包含源码、前端、文档和自检脚本，共 33 个文件。
 
 以下内容在 `.gitignore` 里，不进仓库：
 
@@ -1064,10 +1064,10 @@ git diff
 git show <commit>
 
 # 单个文件回到某个版本
-git checkout v1.2.0 -- server.py
+git checkout v1.3.1 -- server.py
 
 # 整个工作区回到标签（会丢弃未提交修改）
-git reset --hard v1.2.0
+git reset --hard v1.3.1
 ```
 
 ### 提交约定
@@ -1241,3 +1241,48 @@ Required Notice: Copyright 黄智皓 (https://aaaa.yiye.pw/)
 
 `build_single.py` 与 `build_win64.py` 产出的文件在启动弹窗里带有作者、
 免费声明与项目地址。分发这些产物同样受 `LICENSE` + `NOTICE` 约束。
+
+## 十九、版本历史
+
+| 版本 | 主要变更 |
+|---|---|
+| 1.3.1 | 修复打包版子进程 `import console` 失败：embedded Python 的 `._pth` 让 `sys.path` 进入 isolated 模式，脚本目录不再自动加入 |
+| 1.3.0 | 联动选项：选完选项再补充填写，模板按选项配置候选 |
+| 1.2.0 | 一键复制题目文本（题号 + 题型 + 选项）；量表/排序题补 `options` 解析 |
+| 1.1.0 | 选择题按轮次配置选项概率，四种 mode；题目文本导出 |
+| 1.0.0 | HTTP 提交 + Playwright 浏览器引擎 + Web 控制台 + 填空题模板 |
+
+### 当前版本对应关系
+
+```text
+源码 APP_VERSION   1.3.1
+主分支 main         1.3.1 的源码
+标签                v1.3.1（当前）、v1.3.0、v1.2.0
+```
+
+### 可执行文件不在仓库里
+
+`wjx_probe_win64.exe`、`wjx_probe_offline.pyz`、`wjx_probe_portable_win64.zip`
+都被 `.gitignore` 排除，仓库只有源码。原因有两条：
+
+- exe 单文件 69.9 MB、pyz 54.4 MB，每次构建都变，放进 Git 历史会让仓库迅速膨胀；
+- 构建产物能从源码重建，不需要版本化。
+
+要用 exe，三条路：
+
+1. **本地构建**（需 Python 3.13 + `pip install playwright pyinstaller`）：
+
+   ```bash
+   python build_single.py --bundle-deps
+   python build_win64.py
+   ```
+
+2. **GitHub Releases**：手动上传构建产物，下载地址固定，适合分发。
+3. **直接跑源码**（需本机有 Python）：
+
+   ```bash
+   python server.py --port 8765
+   ```
+
+`wjx_probe_win64.exe` 的价值是自带 Python 与全部依赖，双击即用，
+适合没装 Python 的机器。源码方式要先装依赖，这是两者唯一的区别。

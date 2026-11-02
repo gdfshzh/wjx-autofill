@@ -89,16 +89,16 @@ error: Cannot switch to a different thread
 
 ```
   2 个页面已同时发起加载
-[OOHKkG8#1] 成功 joinid=<已脱敏>  38.5s
-[tKJc7Gq#1] 成功 joinid=<已脱敏>  42.6s
+[OOHKkG8#1] 成功 joinid=128155128151  38.5s
+[tKJc7Gq#1] 成功 joinid=128155250623  42.6s
 完成：成功 2 · 失败 0 · 用时 85s
 ```
 
 ### mode=process（多进程，真并行）
 
 ```
-[OOHKkG8#1] 成功 joinid=<已脱敏>  52.6s
-[tKJc7Gq#1] 成功 joinid=<已脱敏>  56.1s
+[OOHKkG8#1] 成功 joinid=128155233935  52.6s
+[tKJc7Gq#1] 成功 joinid=128155232334  56.1s
 完成：成功 2 · 失败 0 · 用时 56s
 ```
 
