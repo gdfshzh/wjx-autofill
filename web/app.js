@@ -48,6 +48,16 @@ function esc(s) {
   ));
 }
 
+/** 联动选项的补充输入框：选中该项后才显示，值和选项一起提交。 */
+function optTextView(q, o) {
+  if (!o || !o.has_text) return '';
+  const req = o.text_required ? '（必填）' : '';
+  return `<div class="opt-extra" hidden>
+    <input class="opt-text" data-topic="${q.topic}" data-value="${esc(o.value)}"
+           placeholder="补充填写${req}" spellcheck="false">
+  </div>`;
+}
+
 function renderSurvey(survey) {
   const box = $('#questions');
   if (!survey || !survey.questions || !survey.questions.length) {
@@ -83,9 +93,12 @@ function renderSurvey(survey) {
     if (q.type_name === '单选') {
       html += '<div class="opts">';
       for (const o of q.options) {
-        html += `<label class="opt">
-          <input type="radio" name="q${q.topic}" value="${esc(o.value)}">
-          <span>${esc(o.text)}</span></label>`;
+        html += `<div class="opt-cell">
+          <label class="opt">
+            <input type="radio" name="q${q.topic}" value="${esc(o.value)}">
+            <span>${esc(o.text)}</span></label>
+          ${optTextView(q, o)}
+        </div>`;
       }
       html += '</div>';
     } else if (q.type_name === '多选') {
@@ -94,9 +107,12 @@ function renderSurvey(survey) {
       const cap = q.max_select || q.exact_select || '';
       html += `<div class="opts" data-max="${cap}" data-topic="${q.topic}">`;
       for (const o of q.options) {
-        html += `<label class="opt">
-          <input type="checkbox" name="q${q.topic}" value="${esc(o.value)}">
-          <span>${esc(o.text)}</span></label>`;
+        html += `<div class="opt-cell">
+          <label class="opt">
+            <input type="checkbox" name="q${q.topic}" value="${esc(o.value)}">
+            <span>${esc(o.text)}</span></label>
+          ${optTextView(q, o)}
+        </div>`;
       }
       html += '</div>';
     } else if (q.type_name === '矩阵量表') {
@@ -129,12 +145,13 @@ function renderSurvey(survey) {
 
   box.innerHTML = html;
 
-  // 选中态高亮
+  // 选中态高亮 + 联动补充框显隐
   box.querySelectorAll('.opt input').forEach((inp) => {
     inp.addEventListener('change', () => {
       const name = inp.name;
       box.querySelectorAll(`input[name="${name}"]`).forEach((x) => {
         x.closest('.opt').classList.toggle('on', x.checked);
+        syncOptExtra(x);
       });
       if (inp.type === 'checkbox') checkMax(inp);
       updateCounts();   // 手工作答也要实时更新「已填」，否则用户以为没选上
@@ -162,6 +179,13 @@ function renderSurvey(survey) {
 
   updateCounts();
   if (tplReady) applyTplToAnswerArea();
+}
+
+/* 联动选项：只有勾上时才露出补充输入框，取消勾选就收起 */
+function syncOptExtra(inp) {
+  const cell = inp.closest('.opt-cell');
+  const extra = cell ? cell.querySelector('.opt-extra') : null;
+  if (extra) extra.hidden = !inp.checked;
 }
 
 /* 多选超限：回滚本次勾选并给明确视觉反馈，避免用户以为「点了没反应」 */
@@ -210,6 +234,23 @@ function collectAnswers() {
   return ans;
 }
 
+/** 收集联动选项的补充文本：{题号: {选项值: 文本}}，只收已勾选/选中的项。 */
+function collectOptionTexts() {
+  const out = {};
+  $$('#questions .opt-text').forEach((el) => {
+    const text = (el.value || '').trim();
+    if (!text) return;
+    const topic = el.dataset.topic;
+    const value = el.dataset.value;
+    const picked = document.querySelector(
+      `input[name="q${topic}"][value="${value}"]:checked`);
+    if (!picked) return;
+    if (!out[topic]) out[topic] = {};
+    out[topic][value] = text;
+  });
+  return out;
+}
+
 /** 把超限的勾选截断到上限。导入文件、后端回填这两条路径都可能带进超限值，
  *  它们不经过 change 事件，checkMax 管不到。 */
 function trimOverLimit(quiet = false) {
@@ -222,6 +263,7 @@ function trimOverLimit(quiet = false) {
     checked.slice(max).forEach((x) => {
       x.checked = false;
       x.closest('.opt').classList.remove('on');
+      syncOptExtra(x);
     });
     fixed.push(`Q${group.dataset.topic}`);
   });
@@ -231,7 +273,7 @@ function trimOverLimit(quiet = false) {
   return fixed;
 }
 
-function applyAnswers(ans) {
+function applyAnswers(ans, optionTexts) {
   const s = state.survey;
   if (!s || !ans) return;
 
@@ -263,7 +305,22 @@ function applyAnswers(ans) {
     }
   }
   trimOverLimit();
+  $$('#questions .opt input').forEach(syncOptExtra);
+  if (optionTexts) applyOptionTexts(optionTexts);
   updateCounts();
+}
+
+/** 把后端回填的补充文本写进对应选项的输入框。 */
+function applyOptionTexts(texts) {
+  if (!texts || typeof texts !== 'object') return;
+  for (const [topic, per] of Object.entries(texts)) {
+    if (!per || typeof per !== 'object') continue;
+    for (const [value, text] of Object.entries(per)) {
+      const el = document.querySelector(
+        `.opt-text[data-topic="${topic}"][data-value="${value}"]`);
+      if (el) el.value = text == null ? '' : String(text);
+    }
+  }
 }
 
 function updateCounts() {
@@ -284,6 +341,8 @@ async function fill(kind) {
         x.closest('.opt').classList.remove('on');
       }
     });
+    $$('#questions .opt-text').forEach((x) => { x.value = ''; });
+    $$('#questions .opt-extra').forEach((x) => { x.hidden = true; });
     $$('#questions select').forEach((s) => { s.selectedIndex = Math.floor(s.options.length / 2); });
     updateCounts();
     return;
@@ -433,7 +492,7 @@ function closeSurveyText() {
 /* ---------------------------------------------------------------- 填空题模板 */
 /* 模板与题目的对应：按 topic（题号）绑定，不按题干文本 —— 题干可能微调，
    题号在一份问卷里唯一且稳定。数据存在后端 fill_template.json，刷新不丢。 */
-const tpl = { items: {}, random: false, sig: '', stale: false };
+const tpl = { items: {}, optionTexts: {}, random: false, sig: '', stale: false };
 let tplReady = false;
 
 function fillQuestions() {
@@ -441,10 +500,21 @@ function fillQuestions() {
     .filter((q) => q.type_name && q.type_name.indexOf('填空') === 0);
 }
 
+/** 带「选完选项再补充填写」的题；只有 has_option_text 的才进模板面板。 */
+function linkedQuestions() {
+  return (state.survey ? state.survey.questions : [])
+    .filter((q) => (q.options || []).some((o) => o.has_text));
+}
+
+function linkedOptions(q) {
+  return (q.options || []).filter((o) => o.has_text);
+}
+
 async function loadTpl() {
   const r = await api('/api/fill/template');
   if (!r.ok) return;
   tpl.items = r.items || {};
+  tpl.optionTexts = r.option_texts || {};
   tpl.random = !!r.random;
   tpl.sig = r.sig || '';
   tpl.stale = !!r.stale;
@@ -459,6 +529,7 @@ function applyTplToAnswerArea() {
   // 模板属于另一份问卷时不往界面上套：后端运行时也会整份作废，
   // 两边表现要一致，否则界面上显示「模板 4 候选」但实际没用
   const items = tpl.stale ? {} : tpl.items;
+  const opts = tpl.stale ? {} : tpl.optionTexts;
   let n = 0;
   for (const q of fillQuestions()) {
     const vals = items[q.topic] || [];
@@ -477,19 +548,39 @@ function applyTplToAnswerArea() {
     }
     if (vals.length) n++;
   }
+
+  // 联动选项：模板有候选时在输入框里提示第一个，实际提交按轮次取候选
+  let linked = 0;
+  for (const q of linkedQuestions()) {
+    for (const o of linkedOptions(q)) {
+      const vals = ((opts[q.topic] || {})[o.value]) || [];
+      const el = document.querySelector(
+        `.opt-text[data-topic="${q.topic}"][data-value="${o.value}"]`);
+      if (!el) continue;
+      el.title = vals.length ? `模板 ${vals.length} 个候选，例如：${vals[0]}` : '';
+      el.placeholder = vals.length
+        ? `模板 ${vals.length} 候选：${vals[0]}`
+        : `补充填写${o.text_required ? '（必填）' : ''}`;
+      if (vals.length) linked++;
+    }
+  }
+
   const badge = $('#tplBadge');
-  if (badge) { badge.hidden = n === 0; badge.textContent = n; }
+  const total = n + linked;
+  if (badge) { badge.hidden = total === 0; badge.textContent = total; }
   updateCounts();
 }
 
 function renderTplList() {
   const box = $('#tplList');
   const qs = fillQuestions();
-  if (!qs.length) {
-    box.innerHTML = '<div class="dr-empty">这份问卷没有填空题</div>';
+  const lqs = linkedQuestions();
+  if (!qs.length && !lqs.length) {
+    box.innerHTML = '<div class="dr-empty">这份问卷没有填空题或联动补充题</div>';
     return;
   }
-  box.innerHTML = qs.map((q) => {
+
+  let html = qs.map((q) => {
     const vals = tpl.items[q.topic] || [];
     return `<div class="tpl-item${vals.length ? ' on' : ''}" data-topic="${q.topic}">
       <div class="tpl-q"><b>Q${q.topic}</b><span>${esc(q.prompt)}</span></div>
@@ -498,9 +589,33 @@ function renderTplList() {
     </div>`;
   }).join('');
 
-  box.querySelectorAll('textarea').forEach((t) => {
+  if (lqs.length) {
+    html += `<div class="tpl-sec">联动补充文本<em>选择带补充框的选项后，按这里的内容填写</em></div>`;
+    html += lqs.map((q) => {
+      const per = tpl.optionTexts[q.topic] || {};
+      const rows = linkedOptions(q).map((o) => {
+        const vals = per[o.value] || [];
+        return `<div class="opt-tpl" data-topic="${q.topic}" data-value="${o.value}">
+          <div class="opt-tpl-head">
+            <b>${esc(o.text)}</b>
+            <span class="${vals.length ? 'on' : ''}">${vals.length ? vals.length + ' 个候选' : '未配置，用选项名兜底'}</span>
+          </div>
+          <textarea data-opt-topic="${q.topic}" data-opt-value="${o.value}" rows="2"
+            placeholder="一行一个补充文本候选，例如：&#10;XX中学&#10;XX旅行社">${esc(vals.join('\n'))}</textarea>
+        </div>`;
+      }).join('');
+      return `<div class="tpl-item linked" data-linked-topic="${q.topic}">
+        <div class="tpl-q"><b>Q${q.topic}</b><span>${esc(q.prompt)}</span></div>
+        ${rows}
+      </div>`;
+    }).join('');
+  }
+  box.innerHTML = html;
+
+  // 填空题候选
+  box.querySelectorAll('textarea[data-topic]').forEach((t) => {
     t.addEventListener('input', () => {
-      const n = t.value.split('\n').map((s) => s.trim()).filter(Boolean).length;
+      const n = t.value.split('\n').map((x) => x.trim()).filter(Boolean).length;
       const item = t.closest('.tpl-item');
       item.classList.toggle('on', n > 0);
       const lab = item.querySelector('.tpl-n');
@@ -509,24 +624,78 @@ function renderTplList() {
       updateTplStat();
     });
   });
+
+  // 联动选项候选
+  box.querySelectorAll('textarea[data-opt-topic]').forEach((t) => {
+    t.addEventListener('input', () => {
+      const n = t.value.split('\n').map((x) => x.trim()).filter(Boolean).length;
+      const row = t.closest('.opt-tpl');
+      const lab = row.querySelector('.opt-tpl-head span');
+      lab.textContent = n ? `${n} 个候选` : '未配置，用选项名兜底';
+      lab.classList.toggle('on', n > 0);
+      const item = t.closest('.tpl-item');
+      item.classList.toggle('on',
+        Array.from(item.querySelectorAll('textarea[data-opt-topic]'))
+          .some((x) => x.value.trim()));
+      updateTplStat();
+    });
+  });
   updateTplStat();
 }
 
 function collectTpl() {
-  const out = {};
-  $$('#tplList textarea').forEach((t) => {
+  const items = {};
+  $$('#tplList textarea[data-topic]').forEach((t) => {
     const vals = t.value.split('\n').map((s) => s.trim()).filter(Boolean);
-    if (vals.length) out[t.dataset.topic] = vals;
+    if (vals.length) items[t.dataset.topic] = vals;
   });
-  return out;
+
+  const option_texts = {};
+  $$('#tplList textarea[data-opt-topic]').forEach((t) => {
+    const vals = t.value.split('\n').map((s) => s.trim()).filter(Boolean);
+    if (!vals.length) return;
+    const topic = t.dataset.optTopic;
+    const value = t.dataset.optValue;
+    if (!option_texts[topic]) option_texts[topic] = {};
+    option_texts[topic][value] = vals;
+  });
+  return { items, option_texts };
 }
 
 function updateTplStat() {
-  const items = collectTpl();
+  const { items, option_texts } = collectTpl();
   const n = Object.keys(items).length;
   const total = Object.values(items).reduce((a, v) => a + v.length, 0);
+  const linked = Object.values(option_texts)
+    .reduce((a, per) => a + Object.keys(per).length, 0);
   const el = $('#tplStat');
-  if (el) el.textContent = n ? `${n} 题 / ${total} 个候选` : '尚未配置';
+  if (!el) return;
+  const parts = [];
+  if (n) parts.push(`填空 ${n} 题 / ${total} 候选`);
+  if (linked) parts.push(`联动 ${linked} 选项`);
+  el.textContent = parts.length ? parts.join(' · ') : '尚未配置';
+}
+
+function optionPlain(text) {
+  return String(text || '').replace(/^\s*(?:[（(]\s*[A-Za-z]\s*[)）]|[A-Za-z])\s*[.、．:：)）]\s*/, '').trim()
+    || String(text || '').trim();
+}
+
+/** 给联动选项生成候选骨架：先用选项名占位，用户再改成具体机构名。 */
+function generateTplSkeleton() {
+  let n = 0;
+  for (const q of linkedQuestions()) {
+    if (!tpl.optionTexts[q.topic]) tpl.optionTexts[q.topic] = {};
+    for (const o of linkedOptions(q)) {
+      if (!(tpl.optionTexts[q.topic][o.value] || []).length) {
+        tpl.optionTexts[q.topic][o.value] = [optionPlain(o.text)];
+        n++;
+      }
+    }
+  }
+  if (!n) { toast('联动选项都已有候选，不需要再生成'); return; }
+  renderTplList();
+  toast(`已生成 ${n} 个联动候选，请把选项名改成具体内容后再保存`);
 }
 
 function setTplModeHint(on) {
@@ -560,19 +729,26 @@ function closeTpl() {
 }
 
 async function saveTpl() {
-  const items = collectTpl();
+  const { items, option_texts } = collectTpl();
   const random = $('#tplRandom').checked;
-  const r = await post('/api/fill/template', { items, random });
+  const r = await post('/api/fill/template', { items, option_texts, random });
   if (!r.ok) { toast(r.error || '保存失败', true); return; }
   tpl.items = r.items || {};
+  tpl.optionTexts = r.option_texts || {};
   tpl.random = r.random;
   tpl.sig = r.sig || '';
   tpl.stale = false;
   applyTplToAnswerArea();
   const n = Object.keys(tpl.items).length;
   const total = Object.values(tpl.items).reduce((a, v) => a + v.length, 0);
-  toast(n ? `模板已保存 · ${n} 题 / ${total} 个候选 · ${random ? '每轮随机' : '固定首项'}`
-          : '模板已清空，填空题改用答题区里填的值');
+  const linked = Object.values(tpl.optionTexts)
+    .reduce((a, per) => a + Object.keys(per).length, 0);
+  const parts = [];
+  if (n) parts.push(`填空 ${n} 题 / ${total} 候选`);
+  if (linked) parts.push(`联动 ${linked} 选项`);
+  toast(parts.length
+    ? `模板已保存 · ${parts.join(' · ')} · ${random ? '每轮随机' : '固定首项'}`
+    : '模板已清空，填空题改用答题区里填的值');
   closeTpl();
 }
 
@@ -1350,6 +1526,7 @@ async function startRun() {
     shortid: qrBase64 ? '' : shortid,
     qr_base64: qrBase64,
     answers,
+    option_texts: collectOptionTexts(),   // 联动选项的补充文本
     survey_sig: state.sig,   // 后端据此判断答案是否属于这份问卷
     count: parseInt($('#bcount').value, 10) || 1,
     gap: parseInt($('#bgap').value, 10) || 0,
@@ -1586,7 +1763,7 @@ async function pollQuick() {
         // 同一份问卷：把后端补齐过的完整答案写回界面，
         // 保证「界面显示的就是刚提交的」
         if (!state.survey) await loadSurvey();
-        if (state.survey) applyAnswers(res.answers);
+        if (state.survey) applyAnswers(res.answers, res.option_texts);
       }
     }
   } catch (e) { /* 服务重启时忽略 */ }
@@ -1703,6 +1880,7 @@ $('#btnFillTpl').addEventListener('click', openTpl);
 $('#tplClose').addEventListener('click', closeTpl);
 $('#tplMask').addEventListener('click', closeTpl);
 $('#tplSave').addEventListener('click', saveTpl);
+$('#tplGenerate').addEventListener('click', generateTplSkeleton);
 $('#tplRandom').addEventListener('change', (e) => setTplModeHint(e.target.checked));
 document.addEventListener('keydown', (e) => {
   const d = $('#tplDrawer');

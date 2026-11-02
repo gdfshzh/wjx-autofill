@@ -35,7 +35,7 @@
       </div>
       <div class="fill-tools">
         <button class="btn sm" id="btnWeights">选项概率<b class="tpl-badge" id="wBadge" hidden>0</b></button>
-        <button class="btn sm" id="btnFillTpl">填空题模板<b class="tpl-badge" id="tplBadge" hidden>0</b></button>
+        <button class="btn sm" id="btnFillTpl">模板配置<b class="tpl-badge" id="tplBadge" hidden>0</b></button>
         <button class="btn sm" data-fill="random">随机填充</button>
         <button class="btn sm" data-fill="first">全部首项</button>
         <button class="btn sm" data-fill="last">全部末项</button>
@@ -151,10 +151,10 @@
 <div class="drawer-mask" id="tplMask" hidden></div>
 <aside class="drawer" id="tplDrawer" hidden aria-label="填空题模板">
   <div class="dr-head">
-    <h3>填空题模板</h3>
+    <h3>填空与联动模板</h3>
     <button class="btn xs" id="tplClose">关闭</button>
   </div>
-  <p class="dr-tip">每行一个候选答案。批量填写时按题分别取值，互不影响。</p>
+  <p class="dr-tip">每行一个候选答案。上半部分是按题填写的填空候选，下半部分是选择题「选完选项再补充填写」的候选。</p>
 
   <label class="dr-switch">
     <input type="checkbox" id="tplRandom">
@@ -167,6 +167,7 @@
 
   <div class="dr-foot">
     <span id="tplStat" class="dr-stat">—</span>
+    <button class="btn" id="tplGenerate" title="给联动选项生成候选骨架">生成骨架</button>
     <button class="btn primary" id="tplSave">保存模板</button>
   </div>
 </aside>
@@ -180,7 +181,8 @@
   </div>
   <p class="dr-tip">
     配置按「轮次 + 题目」独立保存，互不影响。已配置的题目在该轮按概率抽取；
-    未配置的题目沿用控制坞里的「每轮随机」开关。
+    未配置的题目沿用控制坞里的「每轮随机」开关。带补充填写的选项，
+    文本在「模板配置」里按选项配，概率只决定选哪个选项。
   </p>
 
   <div class="w-roundbar">
