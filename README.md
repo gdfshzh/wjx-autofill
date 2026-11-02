@@ -287,5 +287,3 @@ python -m pip install beautifulsoup4 lxml playwright curl_cffi
 构建产物不在仓库里，从 [Releases](https://github.com/gdfshzh/wjx-autofill/releases) 下载或用 [docs/BUILD.md](docs/BUILD.md) 里的命令重建。
 
 ---
-
-交流群 1121243020 ｜ 中转站 pursueray.cn ｜ 官网 https://aaaa.yiye.pw/ ｜ 本项目完全免费
