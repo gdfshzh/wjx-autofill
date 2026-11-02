@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>问卷星批量作答控制台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="dot"></span>
+    <h1>问卷星作答器</h1>
+  </div>
+  <div class="fetch">
+    <label class="qr-upload" id="qrLabel" title="上传二维码图片，自动识别">
+      <input type="file" id="qrFile" accept="image/*" hidden>
+      <span id="qrIcon">📷</span>
+      <b id="qrName">二维码</b>
+    </label>
+    <input id="shortid" type="text" placeholder="短链 Oki2m8H 或完整链接" spellcheck="false">
+    <button id="btnFetch" class="btn primary">抓取并解析</button>
+  </div>
+  <div id="surveyMeta" class="meta">未加载问卷</div>
+</header>
+
+<main>
+  <section class="answer-area">
+    <div class="area-head">
+      <div class="ah-left">
+        <h2>答题区</h2>
+        <span class="count" id="counts"><b id="filled">0</b>/<b id="total">0</b></span>
+        <span class="rand-tag" id="randTag" hidden>每轮随机 · 勾选仅供参考</span>
+      </div>
+      <div class="fill-tools">
+        <button class="btn sm" id="btnWeights">选项概率<b class="tpl-badge" id="wBadge" hidden>0</b></button>
+        <button class="btn sm" id="btnFillTpl">填空题模板<b class="tpl-badge" id="tplBadge" hidden>0</b></button>
+        <button class="btn sm" data-fill="random">随机填充</button>
+        <button class="btn sm" data-fill="first">全部首项</button>
+        <button class="btn sm" data-fill="last">全部末项</button>
+        <button class="btn sm" data-fill="clear">清空</button>
+        <button class="btn sm" id="btnExportText" title="按题号、题型、选项整理成文本并复制">复制题目</button>
+        <button class="btn sm" id="btnImport">导入</button>
+        <button class="btn sm" id="btnExport">导出</button>
+        <input id="fileImport" type="file" accept=".json" hidden>
+      </div>
+    </div>
+
+    <!-- 作答控制坞：与答题区同属一块，状态与操作只在这里 -->
+    <div class="dock" id="dock">
+      <div class="dstate">
+        <i class="bdot" id="bdot"></i>
+        <b id="bphase">未开始</b>
+        <span class="mono dround" id="bround">—</span>
+        <span class="dnow" id="bnow">勾选答案后点「开始作答」</span>
+      </div>
+      <div class="dbar"><div id="bfill"></div></div>
+      <div class="dctl">
+        <label class="dswitch" id="randLabel" title="每轮重新随机单选题/多选题/矩阵量表；开启后答题区的勾选不再作为提交内容，只当参考">
+          <input type="checkbox" id="randEach">
+          <i></i>
+          <span>每轮随机</span>
+        </label>
+        <label>次数 <input id="bcount" type="number" min="1" max="200" value="3"></label>
+        <label>间隔 <input id="bgap" type="number" min="0" max="7200" value="60"><i>s</i></label>
+        <label class="dproxy">代理 <input id="proxy" type="text" placeholder="可空" spellcheck="false"></label>
+        <span class="dspacer"></span>
+        <button id="btnBStart" class="btn run">开始作答</button>
+        <button id="btnBStop" class="btn" disabled>停止</button>
+      </div>
+      <div class="dcap" id="bcap" hidden>
+        需要你在浏览器窗口里点一下「智能验证」，点完脚本自动继续
+      </div>
+    </div>
+
+    <div id="questions" class="questions">
+      <div class="empty">填入短链或上传二维码，点「抓取并解析」</div>
+    </div>
+  </section>
+</main>
+
+<footer class="logbar">
+  <div class="log-head">
+    <span>运行日志</span>
+    <span class="sign">作者 黄智皓 · 完全免费 · 禁止商用与学术造假</span>
+    <button id="btnClearLog" class="btn xs">清空</button>
+  </div>
+  <div id="log" class="log"></div>
+</footer>
+
+<div id="toast" class="toast"></div>
+
+<!-- 启动弹窗：每次打开页面都出现，不做「不再提示」记忆 -->
+<div class="about-mask" id="aboutMask">
+  <div class="about" role="dialog" aria-modal="true" aria-labelledby="aboutTitle">
+    <div class="about-top">
+      <span class="about-mark">研</span>
+      <div class="about-title">
+        <h2 id="aboutTitle">问卷星批量作答控制台</h2>
+        <p class="about-sub" id="aboutSub">本地运行 · 浏览器作答 · 单文件版</p>
+      </div>
+    </div>
+
+    <dl class="about-facts">
+      <div>
+        <dt>作者</dt>
+        <dd id="aboutAuthor">黄智皓</dd>
+      </div>
+      <div>
+        <dt>授权</dt>
+        <dd class="free">本项目完全免费</dd>
+      </div>
+      <div>
+        <dt>限制</dt>
+        <dd class="ban">禁止商用 · 禁止学术造假</dd>
+      </div>
+    </dl>
+
+    <p class="about-note" id="aboutNote">
+      免费分发，任何人不应向你收取费用。使用产生的后果由使用者自行承担。
+    </p>
+
+    <div class="about-foot">
+      <button class="btn primary" id="aboutOk">我已知悉，开始使用</button>
+    </div>
+  </div>
+</div>
+
+<!-- 题目文本：一键复制当前问卷，按题号 + 题型 + 选项整理 -->
+<div class="txt-mask" id="txtMask" hidden>
+  <div class="txt-box" role="dialog" aria-modal="true" aria-labelledby="txtTitle">
+    <div class="txt-head">
+      <h3 id="txtTitle">题目文本</h3>
+      <button class="btn xs" id="txtClose">关闭</button>
+    </div>
+    <p class="txt-tip">
+      已按「题号 + 题型 + 选项」整理。打开时自动复制一次；也可以先改再复制。
+    </p>
+    <p class="txt-warn" id="txtWarn" hidden></p>
+    <textarea id="txtBody" spellcheck="false" placeholder="还没有题目数据"></textarea>
+    <div class="txt-foot">
+      <span class="txt-stat" id="txtStat">—</span>
+      <button class="btn" id="txtRefresh">重新生成</button>
+      <button class="btn primary" id="txtCopy">复制到剪贴板</button>
+    </div>
+  </div>
+</div>
+
+<!-- 填空题模板：侧边抽屉，独立于答题区 -->
+<div class="drawer-mask" id="tplMask" hidden></div>
+<aside class="drawer" id="tplDrawer" hidden aria-label="填空题模板">
+  <div class="dr-head">
+    <h3>填空题模板</h3>
+    <button class="btn xs" id="tplClose">关闭</button>
+  </div>
+  <p class="dr-tip">每行一个候选答案。批量填写时按题分别取值，互不影响。</p>
+
+  <label class="dr-switch">
+    <input type="checkbox" id="tplRandom">
+    <i></i>
+    <span>每轮随机取值</span>
+  </label>
+  <p class="dr-hint" id="tplMode">关闭：每轮都填第一个候选，多轮答案完全一致</p>
+
+  <div class="dr-list" id="tplList"></div>
+
+  <div class="dr-foot">
+    <span id="tplStat" class="dr-stat">—</span>
+    <button class="btn primary" id="tplSave">保存模板</button>
+  </div>
+</aside>
+
+<!-- 选择题选项概率：按「轮次 × 题目」配置，未配置的轮次/题目走默认均匀 -->
+<div class="drawer-mask" id="wMask" hidden></div>
+<aside class="drawer wide" id="wDrawer" hidden aria-label="选项概率配置">
+  <div class="dr-head">
+    <h3>选项概率配置</h3>
+    <button class="btn xs" id="wClose">关闭</button>
+  </div>
+  <p class="dr-tip">
+    配置按「轮次 + 题目」独立保存，互不影响。已配置的题目在该轮按概率抽取；
+    未配置的题目沿用控制坞里的「每轮随机」开关。
+  </p>
+
+  <div class="w-roundbar">
+    <label>轮次 <input id="wRound" type="number" min="1" max="999" value="1"></label>
+    <span class="w-roundhint" id="wRoundHint">—</span>
+    <span class="w-spacer"></span>
+    <button class="btn xs" id="wCopyNext">复制到下一轮</button>
+    <button class="btn xs" id="wCopyAll">套用到全部</button>
+    <button class="btn xs" id="wClearRound">清空本轮</button>
+  </div>
+
+  <div class="w-body">
+    <div class="w-qlist" id="wQList"></div>
+    <div class="w-editor" id="wEditor">
+      <div class="dr-empty">左侧选一道选择题开始配置</div>
+    </div>
+  </div>
+
+  <div class="w-msg" id="wMsg" hidden></div>
+
+  <div class="dr-foot">
+    <span class="dr-stat" id="wStat">—</span>
+    <button class="btn" id="wUniform">均匀</button>
+    <button class="btn" id="wRestore">清除该题</button>
+    <button class="btn primary" id="wSave">保存本题</button>
+  </div>
+</aside>
+
+<script src="/app.js"></script>
+</body>
+</html>

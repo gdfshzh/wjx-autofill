@@ -1,0 +1,9 @@
+* text=auto
+# 启动.bat 是 GBK + CRLF，不能被换行/编码转换
+*.bat -text
+*.cmd -text
+# 二进制发布物（如果以后强制纳入仓库）
+*.exe binary
+*.zip binary
+*.7z binary
+*.pyz binary
