@@ -24,6 +24,12 @@ import re
 import sys
 import time
 
+# 打包版用 embedded Python，带 ._pth 时处于 isolated 模式：脚本目录不会
+# 自动进 sys.path，PYTHONPATH 也被忽略。作为子进程被 server.py 拉起时，
+# 同级模块（console / humanize / parse_wjx）会直接 ModuleNotFoundError，
+# 所以这里显式补一次。源码运行时这行是空操作。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 try:
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
     HAS_PW = True

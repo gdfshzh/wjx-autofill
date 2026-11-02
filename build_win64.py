@@ -136,10 +136,16 @@ def ensure_embeddable(refresh=False):
 
 
 def setup_pth():
-    """_pth 决定 sys.path：标准库 zip -> site-packages -> 当前目录，并启用 site。"""
+    """_pth 决定 sys.path：标准库 zip -> site-packages -> 当前目录 -> app，并启用 site。
+
+    带 ._pth 的 embedded Python 是 isolated 模式：不会把「脚本所在目录」
+    加进 sys.path，PYTHONPATH 也整个忽略。app 目录必须显式列出来，
+    否则 server.py 拉起的子进程（wjx_browser.py）import 同级模块会
+    ModuleNotFoundError。路径相对 ._pth 自己所在的 python/ 目录。
+    """
     pth = os.path.join(PY_DIR, "python313._pth")
     with open(pth, "w", encoding="utf-8") as f:
-        f.write("python313.zip\nLib\\site-packages\n.\nimport site\n")
+        f.write("python313.zip\nLib\\site-packages\n.\n..\\app\nimport site\n")
 
 
 def install_wheels(refresh=False):

@@ -60,7 +60,7 @@ WEIGHT_PATH = os.path.join(HERE, "choice_weights.json")
 # ---------------------------------------------------------------- 项目信息
 # 单文件版与散装版共用这一份，前端弹窗从 /api/about 取，不在页面里写死多份
 APP_NAME = "问卷星批量作答控制台"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 AUTHOR = "黄智皓"
 AUTHOR_NOTE = "本项目完全免费，禁止商用和学术造假"
 ABOUT = {
