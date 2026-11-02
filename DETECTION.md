@@ -141,7 +141,7 @@ think_seconds = reading_time(nq) if human else random.randint(90, 240)
 human 模式: True
 预热资源 9/9 个，耗时 1.5s
 估算作答时长: 160 秒
-code=10 | ktimes=47 | joinid=128146081673 | sojumpindex=248
+code=10 | ktimes=47 | joinid=<已脱敏> | sojumpindex=248
 ```
 
 对比优化前：`ktimes=10`、资源请求 0 个、Python TLS 指纹。

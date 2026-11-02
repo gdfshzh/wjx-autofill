@@ -798,7 +798,7 @@ if "结果 {'ok': True" in line:      # 老做法
 
 ```
 移动版完成页  ...completemobile2.aspx?activityid=xxx&joinactivity=128153311680
-PC 版        ...&joinid=128153311680
+PC 版        ...&joinid=<已脱敏>
 ```
 
 两种都认，拿不到编号一律降级为失败。之前只认 `joinid`，把移动版的成功全判成失败——
