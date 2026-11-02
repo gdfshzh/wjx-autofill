@@ -1030,3 +1030,52 @@ python selftest_survey_text.py
 
 用用户给的样例逐字比对，另外覆盖题号清洗、选项前缀去重、空括号、
 缺选项警告，共 9 项。
+
+## 十六、Git 版本管理
+
+仓库已初始化，主分支 `main`，当前版本打了标签 `v1.2.0`。
+
+```bash
+git log --oneline --decorate
+git status
+git diff
+```
+
+### 入库范围
+
+`git ls-files` 只包含源码、前端、文档和自检脚本，共 29 个文件。
+
+以下内容在 `.gitignore` 里，不进仓库：
+
+- 构建产物：`wjx_probe_win64.exe`、`wjx_probe_offline.pyz`、
+  `wjx_probe_portable_win64.zip`、`wjx_probe_all_in_one.py`、`bundle.zip`；
+- 运行时目录：`_runtime/`、`_portable/`、`_emb/`、`_pyi/`、`offline_deps/`；
+- 运行数据：`survey.json`、`choice_weights.json`、`fill_template.json`、
+  `answers*.json`、`cookies.txt`；
+- 抓下来做分析的 `page_mobile.html`、`jqmobo2.js` 等。
+
+发布产物用 `python build_single.py --bundle-deps` 与
+`python build_win64.py` 重建，不需要占 Git 历史。
+
+### 回滚
+
+```bash
+# 看某次提交改了什么
+git show <commit>
+
+# 单个文件回到某个版本
+git checkout v1.2.0 -- server.py
+
+# 整个工作区回到标签（会丢弃未提交修改）
+git reset --hard v1.2.0
+```
+
+### 提交约定
+
+- `feat:` 新功能
+- `fix:` 修 bug
+- `docs:` 文档
+- `chore:` 构建、依赖、仓库维护
+- `test:` 自检脚本
+
+改完一个可验证的单元就提交一次，不把多个无关改动混在同一个 commit 里。
