@@ -26,7 +26,7 @@ import subprocess
 import sys
 import zipfile
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 BANNER = """
   ============================================
