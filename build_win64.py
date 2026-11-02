@@ -51,6 +51,7 @@ SOURCE_FILES = [
     "server.py", "parse_wjx.py", "wjx_autofill.py", "wjx_browser.py",
     "choice_weights.py", "survey_text.py", "humanize.py", "qr_decode.py",
     "console.py", "run.py", "parallel.py", "probe_parallel.py", "survey.json",
+    "LICENSE", "NOTICE",
 ]
 
 SEVEN_ZIP = r"C:\Program Files\7-Zip\7z.exe"

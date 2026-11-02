@@ -61,6 +61,9 @@ CODE_FILES = [
     "web/index.html",
     "web/style.css",
     "web/app.js",
+    # 许可证随包分发：PolyForm 的 Notices 条款要求拿到副本的人同时拿到条款
+    "LICENSE",
+    "NOTICE",
 ]
 
 # 用户数据：只在运行时目录里不存在时写入

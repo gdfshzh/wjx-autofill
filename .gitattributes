@@ -7,3 +7,7 @@
 *.zip binary
 *.7z binary
 *.pyz binary
+# 文档与许可证统一 LF，避免 diff 噪声
+*.md text eol=lf
+LICENSE text eol=lf
+NOTICE text eol=lf
