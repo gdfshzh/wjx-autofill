@@ -1,3 +1,4 @@
+.gitattributes text eol=lf
 * text=auto
 # 启动.bat 是 GBK + CRLF，不能被换行/编码转换
 *.bat -text
