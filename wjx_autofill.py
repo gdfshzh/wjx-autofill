@@ -259,22 +259,51 @@ def jqsign(nonce: str, ktimes: int) -> str:
     return "".join(chr(ord(c) ^ t) for c in nonce)
 
 
-def build_submitdata(answers: dict, survey: dict) -> str:
+# 问卷星前端 replace_specialChar 的映射：这些字符是 submitdata 的分隔符，
+# 出现在选项补充文本里必须换成全角，否则会把一条答案拆成两段。
+_SP_CHARS = str.maketrans({
+    "$": "ξ", "}": "｝", "^": "ˆ", "|": "¦", "!": "！", "<": "＜",
+})
+
+
+def _safe_text(value) -> str:
+    """补充文本只保留前 3000 字，并转义协议分隔符（与前端一致）。"""
+    return str(value or "").translate(_SP_CHARS)[:3000]
+
+
+def _option_map(q):
+    return {str(o.get("value")): o for o in (q.get("options") or [])}
+
+
+def build_submitdata(answers: dict, survey: dict, option_texts: dict = None) -> str:
     """拼答案串：题号$值，题间用 } 分隔。
 
     单选 -> "1"
     多选 -> "1|2|5"      （spChars[3] = '|'）
     矩阵 -> "1!5,2!4,..." （行号 + '!' + 分值，逗号分隔）
 
+    带补充输入的选项（选完该项才显示的输入框）：
+      单选 -> "4^具体机构名"
+      多选 -> "1^甲|4^乙"
+    分隔符是 spChars[2] = '^'，与 jqmobo2.js 的 getAnswer 分支一致。
+    option_texts 结构：{"题号": {"选项值": "补充文本"}}，按轮次传入。
+
     多选值必须按选项在问卷里的原始顺序排列：前端永远按 DOM 顺序生成 "1|5"，
     如果这里输出 "5|1"，服务端虽仍接受（返回 10），但后台按选项组合归类时
     会当成另一个组合，表现为「统计里看不到变化」。
     """
     types = {str(q["topic"]): q for q in survey["questions"]}
+    texts = option_texts or {}
     parts = []
     for topic in sorted(answers, key=lambda x: int(x)):
         q = types.get(str(topic))
         val = answers[topic]
+        text_map = texts.get(str(topic)) or texts.get(topic) or {}
+        if not isinstance(text_map, dict):
+            text_map = {}
+        else:
+            text_map = {str(k): v for k, v in text_map.items()}
+
         if q and q["type_name"] == "矩阵量表":
             if not isinstance(val, list):
                 raise ValueError(f"Q{topic} 是矩阵题，答案必须是分值列表")
@@ -284,10 +313,22 @@ def build_submitdata(answers: dict, survey: dict) -> str:
             seg = ",".join(f"{i + 1}!{v}" for i, v in enumerate(val))
         elif isinstance(val, list):
             order = {str(o["value"]): i for i, o in enumerate(q["options"])} if q else {}
-            items = sorted((str(v) for v in val), key=lambda v: order.get(v, 999))
-            seg = "|".join(items)
+            omap = _option_map(q) if q else {}
+            pieces = []
+            for v in sorted((str(x) for x in val), key=lambda x: order.get(x, 999)):
+                piece = v
+                opt = omap.get(v) or {}
+                # 只给「该选项确实带补充框」的答案拼 ^，避免把普通选项文本也塞进去
+                if opt.get("has_text") and text_map.get(v):
+                    piece += "^" + _safe_text(text_map[v])
+                pieces.append(piece)
+            seg = "|".join(pieces)
         else:
             seg = str(val)
+            if q:
+                opt = _option_map(q).get(str(val)) or {}
+                if opt.get("has_text") and text_map.get(str(val)):
+                    seg += "^" + _safe_text(text_map[str(val)])
         parts.append(f"{topic}${seg}")
     return "}".join(parts)
 
@@ -369,14 +410,46 @@ def random_answers(survey: dict) -> dict:
     return out
 
 
+
+_OPT_PREFIX = re.compile(r"^\s*(?:[（(]\s*[A-Za-z]\s*[)）]|[A-Za-z])\s*[.、．:：)）]\s*")
+
+
+def fallback_option_texts(answers: dict, survey: dict) -> dict:
+    """没配模板时的兜底：必填补充框用选项名填，避免空着被服务端打回。
+
+    server.py 有完整的「模板 → 手填 → 兜底」链路；这个函数只服务
+    wjx_autofill.py 的 CLI / run.py，保证它们不传 option_texts 也能提交。
+    """
+    out = {}
+    for q in survey.get("questions") or []:
+        topic = str(q.get("topic"))
+        val = answers.get(topic)
+        if val is None:
+            continue
+        vals = val if isinstance(val, list) else [val]
+        optmap = {str(o.get("value")): o for o in (q.get("options") or [])}
+        per = {}
+        for v in vals:
+            opt = optmap.get(str(v))
+            if not opt or not opt.get("has_text") or not opt.get("text_required"):
+                continue
+            text = re.sub(r"\s+", " ", str(opt.get("text") or "")).strip()
+            text = _OPT_PREFIX.sub("", text, count=1).strip() or text or "未填写"
+            per[str(v)] = text
+        if per:
+            out[topic] = per
+    return out
+
 def submit_once(sess: Session, shortid: str, survey: dict, answers: dict,
                 think_seconds: int = None, verbose: bool = True,
-                meta: dict = None, elapsed: int = None, warm: bool = True) -> dict:
+                meta: dict = None, elapsed: int = None, warm: bool = True,
+                option_texts: dict = None) -> dict:
     """完整跑一轮：取 nonce -> 预热资源 -> 等待 -> 签名 -> 提交。返回结果字典。
 
-    meta    : 外部已抓好的页面元数据，传入则跳过重复 GET（调用方自己掌控预热与节奏）
-    elapsed : 实际已等待秒数，仅用于日志
-    warm    : 自己抓页面时，是否按浏览器顺序加载静态资源并上报埋点
+    meta         : 外部已抓好的页面元数据，传入则跳过重复 GET
+    elapsed      : 实际已等待秒数，仅用于日志
+    warm         : 自己抓页面时，是否按浏览器顺序加载静态资源并上报埋点
+    option_texts : 带补充输入框的选项文本，{"题号": {"选项值": "文本"}}
     """
     from humanize import reading_time, think_pause
 
@@ -407,7 +480,10 @@ def submit_once(sess: Session, shortid: str, survey: dict, answers: dict,
     if ktimes < 1:
         ktimes = 1
 
-    submitdata = build_submitdata(answers, survey)
+    if option_texts is None:
+        # CLI / run.py 没有模板链路，至少给必填补充框一个非空兜底
+        option_texts = fallback_option_texts(answers, survey)
+    submitdata = build_submitdata(answers, survey, option_texts)
     params = {
         "shortid": shortid,
         "starttime": meta["starttime"],
@@ -501,7 +577,7 @@ def main():
 
     if args.dry_run:
         print("[dry-run] submitdata:")
-        print(build_submitdata(answers, survey))
+        print(build_submitdata(answers, survey, fallback_option_texts(answers, survey)))
         return
 
     ok = 0

@@ -267,7 +267,8 @@ def cmd_pipeline(args):
     ok(f"{survey['title']} · {survey['question_count']} 题")
 
     print("[3/4] 生成答案")
-    from wjx_autofill import random_answers, validate_answers, build_submitdata
+    from wjx_autofill import (random_answers, validate_answers, build_submitdata,
+                              fallback_option_texts)
     if args.answers:
         answers = json.load(open(args.answers, encoding="utf-8"))
         ok(f"来自 {args.answers}")
@@ -278,7 +279,8 @@ def cmd_pipeline(args):
     if p:
         err("校验未通过：" + "；".join(p[:3]))
         return
-    print("      payload:", build_submitdata(answers, survey)[:110] + "…")
+    print("      payload:", build_submitdata(
+        answers, survey, fallback_option_texts(answers, survey))[:110] + "…")
 
     print("[4/4] 提交")
     if args.dry:

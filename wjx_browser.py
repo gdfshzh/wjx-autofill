@@ -419,7 +419,12 @@ class WjxBrowser:
         self.missing_required = []
 
     # ------------------------------------------------------ 题型分派
-    def fill_all(self, answers: dict):
+    def fill_all(self, answers: dict, option_texts: dict = None):
+        if not option_texts:
+            # 直接跑 CLI、没经 server 的模板链路时，至少给必填补充框兜底
+            from wjx_autofill import fallback_option_texts
+            option_texts = fallback_option_texts(answers, self.survey)
+        option_texts = option_texts or {}
         # 先像人一样把页面从上往下扫一遍
         self.h.scroll(random.randint(300, 700))
         self.h.idle()
@@ -439,7 +444,8 @@ class WjxBrowser:
                     self.h.log(f"  ! Q{topic} 必答但无答案，跳过")
                 continue
 
-            ok = self._with_retry(q, val)
+            texts = option_texts.get(topic) or option_texts.get(int(topic)) or {}
+            ok = self._with_retry(q, val, texts)
             self.done.append(topic if ok else f"{topic}(fail)")
             if not ok and q["required"]:
                 self.missing_required.append(topic)
@@ -462,17 +468,18 @@ class WjxBrowser:
             for e in self.errors[:10]:
                 print("   -", e, flush=True)
 
-    def _with_retry(self, q, val):
+    def _with_retry(self, q, val, texts=None):
         topic = q["topic"]
         msg = ""
+        texts = texts or {}
         for attempt in range(self.retry + 1):
             try:
-                self._answer_one(q, val)
+                self._answer_one(q, val, texts)
             except Exception as e:
                 msg = f"Q{topic} 第{attempt + 1}次失败: {type(e).__name__}: {str(e)[:90]}"
             else:
                 # 点完不算完：坐标点击可能落到别处，前端校验也可能静默拦下
-                if self._verify_one(q, val):
+                if self._verify_one(q, val, texts):
                     return True
                 msg = f"Q{topic} 第{attempt + 1}次点完回读不一致（页面上没选上）"
 
@@ -486,14 +493,15 @@ class WjxBrowser:
             return False
         return False
 
-    def _answer_one(self, q, val):
+    def _answer_one(self, q, val, texts=None):
         t = q["topic"]
         kind = q["type_name"]
+        texts = texts or {}
 
         if kind == "单选":
-            self._single(t, val)
+            self._single(t, val, texts)
         elif kind == "多选":
-            self._multi(t, val)
+            self._multi(t, val, texts)
         elif kind == "矩阵量表":
             self._matrix(t, val)
         elif kind == "下拉":
@@ -518,16 +526,35 @@ class WjxBrowser:
             raise RuntimeError(f"Q{topic} 找不到选项 {value} 的 label")
         self.h.click(sel, f"Q{topic} 选项 {value}")
 
-    def _single(self, topic: int, value):
-        self._pick_label(topic, str(value))
+    def _fill_option_text(self, topic: int, value, texts: dict):
+        """选完带补充框的选项后，把文本填进刚显示出来的输入框。
 
-    def _multi(self, topic: int, values):
+        问卷星的补充框是 display:none，选中后才显示；每项的 rel 是
+        q{topic}_{value}，id 是 tqq{topic}_{value}。两个选择器都兜一下。
+        """
+        text = str((texts or {}).get(str(value), "")).strip()
+        if not text:
+            return
+        sel = (f"#div{topic} .OtherRadioText[rel='q{topic}_{value}'], "
+               f"#div{topic} .OtherText[rel='q{topic}_{value}'], "
+               f"#div{topic} #tqq{topic}_{value}")
+        loc = self.page.locator(sel).first
+        if loc.count() == 0:
+            raise RuntimeError(f"Q{topic} 选项 {value} 找不到补充输入框")
+        self.h.type_text(sel, text, f"Q{topic} 补充")
+
+    def _single(self, topic: int, value, texts=None):
+        self._pick_label(topic, str(value))
+        self._fill_option_text(topic, value, texts)
+
+    def _multi(self, topic: int, values, texts=None):
         vals = values if isinstance(values, list) else [values]
         # 人的勾选顺序不是升序，打乱后再点
         order = list(vals)
         random.shuffle(order)
         for v in order:
             self._pick_label(topic, str(v))
+            self._fill_option_text(topic, v, texts)
             self.h.idle(0.15, 0.5)
 
     # ------------------------------------------------------ 矩阵
@@ -684,8 +711,33 @@ class WjxBrowser:
                 continue
         return out
 
-    def _verify_one(self, q, val):
-        """填完这一题后回读，确认和期望一致。"""
+    def _read_option_text(self, topic, value):
+        """读某个选项补充框的当前值；没有这个框返回 None。"""
+        sel = (f"#div{topic} .OtherRadioText[rel='q{topic}_{value}'], "
+               f"#div{topic} .OtherText[rel='q{topic}_{value}'], "
+               f"#div{topic} #tqq{topic}_{value}")
+        loc = self.page.locator(sel).first
+        if loc.count() == 0:
+            return None
+        try:
+            return (loc.input_value() or "").strip()
+        except Exception:
+            return None
+
+    def _linked_text_missing(self, q, values):
+        """必答的联动选项是否还缺补充文本。"""
+        vals = values if isinstance(values, list) else [values]
+        optmap = {str(o.get("value")): o for o in (q.get("options") or [])}
+        for v in vals:
+            opt = optmap.get(str(v))
+            if not opt or not opt.get("has_text"):
+                continue
+            if opt.get("text_required") and not self._read_option_text(q["topic"], v):
+                return True
+        return False
+
+    def _verify_one(self, q, val, texts=None):
+        """填完这一题后回读，确认选项和补充文本都和期望一致。"""
         topic = str(q["topic"])
         got = self._read_page_state().get(topic)
         if got is None:
@@ -693,20 +745,49 @@ class WjxBrowser:
         tn = q["type_name"]
         if tn == "多选":
             want = sorted(str(v) for v in (val if isinstance(val, list) else [val]))
-            return sorted(str(v) for v in got) == want
-        if tn == "矩阵量表":
+            if sorted(str(v) for v in got) != want:
+                return False
+        elif tn == "矩阵量表":
             try:
                 want = [int(v) for v in val]
             except Exception:
                 return False
-            return [int(v) for v in got] == want
-        return str(got).strip() == str(val).strip()
+            if [int(v) for v in got] != want:
+                return False
+        elif str(got).strip() != str(val).strip():
+            return False
+
+        # 选项对了还要看补充框：必填空着、或者填进去的字被前端清掉，都算失败
+        texts = texts or {}
+        vals = val if isinstance(val, list) else [val]
+        optmap = {str(o.get("value")): o for o in (q.get("options") or [])}
+        for v in vals:
+            opt = optmap.get(str(v))
+            if not opt or not opt.get("has_text"):
+                continue
+            actual = self._read_option_text(topic, v)
+            want_text = str(texts.get(str(v), "")).strip()
+            if actual is None:
+                return False
+            if opt.get("text_required") and not actual:
+                return False
+            if want_text and actual != want_text:
+                return False
+        return True
 
     def _missing_on_page(self):
-        """必答题里，页面上读不到答案的题号。"""
+        """必答题里，页面上读不到答案（或联动补充为空）的题号。"""
         actual = self._read_page_state()
-        return [str(q["topic"]) for q in (self.survey.get("questions") or [])
-                if q.get("required") and str(q["topic"]) not in actual]
+        missing = []
+        for q in (self.survey.get("questions") or []):
+            if not q.get("required"):
+                continue
+            topic = str(q["topic"])
+            if topic not in actual:
+                missing.append(topic)
+            elif self._linked_text_missing(q, actual[topic]):
+                missing.append(topic)
+        return missing
 
     def submit(self, timeout: int = 60) -> dict:
         # 提交前自检：必答题没填上就别点，点了也必然被打回，
@@ -791,7 +872,7 @@ def launch(p, headless: bool, proxy: str = None):
                              proxy={"server": proxy} if proxy else None)
 
 
-def run_once(p, args, survey, answers, idx=1, total=1):
+def run_once(p, args, survey, answers, option_texts=None, idx=1, total=1):
     """跑一轮：新开 context（新 cookie），填完提交，关掉。返回结果字典。"""
     browser = launch(p, args.headless, args.proxy)
     try:
@@ -816,7 +897,7 @@ def run_once(p, args, survey, answers, idx=1, total=1):
         human = Human(page, slow=args.slow)
         eng = WjxBrowser(page, survey, human, retry=args.retry, strict=args.strict,
                      manual_captcha=args.manual_captcha)
-        eng.fill_all(answers)
+        eng.fill_all(answers, option_texts)
         print(f"[第 {idx}/{total} 轮] 已处理 {len(eng.done)} 题，失败 {len(eng.errors)} 题",
               flush=True)
 
@@ -888,12 +969,23 @@ def main():
     # 多轮格式用来让填空题每轮不一样，由 server.py 预先展开好再传进来。
     if isinstance(raw, dict) and isinstance(raw.get("rounds"), list) and raw["rounds"]:
         rounds = raw["rounds"]
+        text_rounds = raw.get("option_texts") or []
 
         def answers_of(i):
             return rounds[(i - 1) % len(rounds)]
+
+        def texts_of(i):
+            if not text_rounds:
+                return {}
+            return text_rounds[(i - 1) % len(text_rounds)]
     else:
         def answers_of(i):
             return raw
+
+        def texts_of(i):
+            if not isinstance(raw, dict):
+                return {}
+            return raw.get("option_texts") or {}
     answers = answers_of(1)
 
     # 换问卷后先看题型支不支持，比填到一半报错好
@@ -906,6 +998,9 @@ def main():
                 print(f"       Q{topic}  {kind}")
         if c["with_other"]:
             print(f"[提示] 含「其他」选项的题：{c['with_other']}，如带输入框需人工确认")
+        if c.get("with_option_text"):
+            print(f"[提示] 含联动补充输入的题：{c['with_option_text']}，"
+                  f"按 option_texts 自动填写")
     except Exception:
         pass
 
@@ -913,7 +1008,7 @@ def main():
     with sync_playwright() as p:
         for i in range(1, max(1, args.count) + 1):
             try:
-                r = run_once(p, args, survey, answers_of(i), i, args.count)
+                r = run_once(p, args, survey, answers_of(i), texts_of(i), i, args.count)
                 if r.get("ok"):
                     ok_n += 1
                 else:

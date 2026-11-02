@@ -60,7 +60,7 @@ WEIGHT_PATH = os.path.join(HERE, "choice_weights.json")
 # ---------------------------------------------------------------- 项目信息
 # 单文件版与散装版共用这一份，前端弹窗从 /api/about 取，不在页面里写死多份
 APP_NAME = "问卷星批量作答控制台"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 AUTHOR = "黄智皓"
 AUTHOR_NOTE = "本项目完全免费，禁止商用和学术造假"
 ABOUT = {
@@ -136,6 +136,8 @@ class State:
         self.fill_template = {}
         self.fill_random = False      # True=每轮从候选里随机取，False=每轮取候选[0]
         self.fill_tpl_sig = ""        # 模板属于哪份问卷，换问卷后用来提示失效
+        # 选择题「选完选项再补充填写」的候选：{topic: {选项值: [候选文本]}}
+        self.fill_option_texts = {}
 
         # 选择题概率配置：按「轮次 → 题号 → 配置」存，结构见 choice_weights.py
         self.choice_weights = empty_store()
@@ -209,10 +211,23 @@ def load_fill_template():
             vals = [str(x).strip() for x in (v if isinstance(v, list) else [v]) if str(x).strip()]
             if vals:
                 items[str(k)] = vals
+        option_texts = {}
+        for k, per in (data.get("option_texts") or {}).items():
+            if not isinstance(per, dict):
+                continue
+            cleaned = {}
+            for val, cands in per.items():
+                arr = [str(x).strip() for x in (cands if isinstance(cands, list) else [cands])
+                       if str(x).strip()]
+                if arr:
+                    cleaned[str(val)] = arr
+            if cleaned:
+                option_texts[str(k)] = cleaned
         with LOCK:
             S.fill_template = items
             S.fill_random = bool(data.get("random"))
             S.fill_tpl_sig = data.get("sig") or ""
+            S.fill_option_texts = option_texts
     except Exception as e:
         S.log(f"读取 fill_template.json 失败：{e}", "err")
 
@@ -222,6 +237,7 @@ def save_fill_template():
         "sig": S.fill_tpl_sig,
         "random": S.fill_random,
         "items": S.fill_template,
+        "option_texts": S.fill_option_texts,
     }
     tmp = FILL_TPL_PATH + ".tmp"
     json.dump(data, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
@@ -295,7 +311,9 @@ def _wait_if_paused():
     return not S.stop_event.is_set()
 
 
-def batch_worker(answers, count, gap, think, proxy, shortid, survey, samplers=None):
+def batch_worker(answers, count, gap, think, proxy, shortid, survey, samplers=None,
+                 option_pools=None, manual_texts=None):
+    text_bags = {}
     try:
         for i in range(1, count + 1):
             if not _wait_if_paused():
@@ -306,6 +324,9 @@ def batch_worker(answers, count, gap, think, proxy, shortid, survey, samplers=No
             round_answers = dict(answers)
             for t, smp in (samplers or {}).get(i, {}).items():
                 round_answers[t] = smp.draw()
+            round_texts = resolve_option_texts(
+                survey, round_answers, option_pools, manual_texts,
+                S.fill_random, text_bags)
 
             with LOCK:
                 S.round = i - 1
@@ -340,7 +361,8 @@ def batch_worker(answers, count, gap, think, proxy, shortid, survey, samplers=No
             try:
                 r = submit_once(sess, shortid, survey, round_answers,
                                 think_seconds=0, verbose=False,
-                                meta=meta, elapsed=wait_s)
+                                meta=meta, elapsed=wait_s,
+                                option_texts=round_texts)
             except Exception as e:
                 with LOCK:
                     S.fail += 1
@@ -437,18 +459,20 @@ def decode_qr_base64(data_url: str) -> str:
     return decode_bytes(raw)
 
 
-def run_browser_engine(shortid, survey, rounds, count, gap, proxy, headless, slow):
+def run_browser_engine(shortid, survey, rounds, count, gap, proxy, headless, slow,
+                       round_texts=None):
     """用真浏览器跑批量。子进程执行 wjx_browser.py，stdout 逐行转成日志。
 
     rounds 是每轮一份的完整答案列表，length 与 count 对齐；
-    子进程按轮次索引取，所以「每轮填空不同」这件事由这里决定，
-    而不是在浏览器里现抽 —— 这样日志里能看到每轮到底填了什么。
+    round_texts 是对齐的联动补充文本 {"题号": {"选项值": "文本"}}。
+    子进程按轮次索引取，所以「每轮填空不同」「每轮补充文本不同」
+    由这里决定，而不是在浏览器里现抽 —— 这样日志里能看到每轮到底填了什么。
     """
     import subprocess
 
     ans_path = os.path.join(HERE, "_answers_run.json")
-    json.dump({"rounds": rounds}, open(ans_path, "w", encoding="utf-8"),
-              ensure_ascii=False)
+    json.dump({"rounds": rounds, "option_texts": round_texts or []},
+              open(ans_path, "w", encoding="utf-8"), ensure_ascii=False)
 
     url = f"https://v.wjx.cn/vm/{shortid}.aspx"
     cmd = [sys.executable, "-u", os.path.join(HERE, "wjx_browser.py"),
@@ -662,14 +686,33 @@ def quick_worker(cfg):
         # 模板同理：换了问卷后 Q5 还是 Q5，但题干完全可能是另一道题，
         # 把旧问卷的「北京/上海」填进新问卷的 Q5 是静默错位，比报错更糟
         tpl = S.fill_template
-        if tpl and S.fill_tpl_sig and S.fill_tpl_sig != cur_sig:
+        otpl = S.fill_option_texts
+        if (tpl or otpl) and S.fill_tpl_sig and S.fill_tpl_sig != cur_sig:
             S.log(f"填空题模板属于另一份问卷（{S.fill_tpl_sig} ≠ {cur_sig}），"
                   f"本次不套用，请在模板面板里核对后重新保存", "warn")
             tpl = {}
+            otpl = {}
+
+        # 界面上给联动选项手填的补充文本。模板优先；模板没配到该选项时，
+        # 这里手填的值才会被用上。
+        manual_texts = {}
+        for k, per in (cfg.get("option_texts") or {}).items():
+            if not isinstance(per, dict):
+                continue
+            cleaned = {}
+            for v, text in per.items():
+                if isinstance(text, str) and text.strip():
+                    cleaned[str(v)] = text.strip()
+            if cleaned:
+                manual_texts[str(k)] = cleaned
+        if stale:
+            manual_texts = {}
 
         answers, used, dropped = merge_answers(survey, given)
         # 模板里的填空值要在校验之前注入，否则必答填空会被判成「未提供」
-        _pre, _, ftopics = build_round_answers(survey, answers, tpl, False, 1)
+        _pre, _, ftopics, _pre_texts = build_round_answers(
+            survey, answers, tpl, False, 1, option_pools=otpl,
+            manual_texts=manual_texts)
         answers = _pre[0]
         problems = validate_answers(answers, survey)
         if problems:
@@ -726,8 +769,9 @@ def quick_worker(cfg):
         if extra_rounds:
             S.log(f"第 {'、'.join(str(x) for x in extra_rounds[:8])} 轮的配置"
                   f"超出本次 {count} 轮，不会生效", "warn")
-        rounds, trace, ftopics = build_round_answers(
-            survey, answers, tpl, S.fill_random, count, choice_random, samplers)
+        rounds, trace, ftopics, round_texts = build_round_answers(
+            survey, answers, tpl, S.fill_random, count, choice_random, samplers,
+            option_pools=otpl, manual_texts=manual_texts)
 
         if choice_random:
             kinds = {}
@@ -746,12 +790,27 @@ def quick_worker(cfg):
             if count > 5:
                 S.log(f"  …共 {count} 轮，此处只列前 5 轮", "dim")
 
+        linked_total = sum(len(x) for x in round_texts)
+        if linked_total:
+            mode = "每轮随机" if S.fill_random else "每轮固定取首项"
+            S.log(f"联动选项补充文本生效（{mode}）：{linked_total} 处", "info")
+            for i, txts in enumerate(round_texts[:3], 1):
+                desc = "、".join(
+                    f"Q{t}.{v}=「{text[:18]}」"
+                    for t, per in txts.items() for v, text in per.items())
+                S.log(f"  第 {i} 轮 {desc}", "dim")
+            if count > 3:
+                S.log(f"  …共 {count} 轮，此处只列前 3 轮", "dim")
+        elif any(q.get("has_option_text") for q in survey["questions"]):
+            S.log("这份问卷有联动补充题，但本轮没解析出补充文本，"
+                  "请到「填空题模板 → 联动补充文本」里配置", "warn")
+
         if engine == "browser":
             S.set_step("submit", "running", f"0/{count}")
             ok_n, fail_n = run_browser_engine(
                 shortid, survey, rounds, count, gap, proxy,
                 bool(cfg.get("headless", False)),
-                float(cfg.get("slow", 0.55)))
+                float(cfg.get("slow", 0.55)), round_texts)
             stopped = S.stop_event.is_set()
             S.set_step("submit", "done" if fail_n == 0 and not stopped else "fail",
                        f"成功 {ok_n} · 失败 {fail_n}")
@@ -760,6 +819,7 @@ def quick_worker(cfg):
                        "title": survey["title"], "shortid": shortid,
                        # 回填第 1 轮实际提交的内容，而不是展开前那份基准
                        "answers": rounds[0] if rounds else answers,
+                       "option_texts": round_texts[0] if round_texts else {},
                        "engine": "browser", "sig": cur_sig}
                 if stopped and ok_n == 0:
                     # 区分「被停下」和「跑失败了」：前者不是错误，只是没跑完
@@ -794,7 +854,9 @@ def quick_worker(cfg):
                     time.sleep(1)
                 r = submit_once(s2, shortid, survey,
                                 rounds[i - 1] if rounds else answers, meta=m2,
-                                think_seconds=0, verbose=False)
+                                think_seconds=0, verbose=False,
+                                option_texts=(round_texts[i - 1]
+                                              if i - 1 < len(round_texts) else None))
             except Exception as e:
                 fail_n += 1
                 S.log(f"第 {i}/{count} 轮 异常 {type(e).__name__}: {str(e)[:80]}", "err")
@@ -838,6 +900,7 @@ def quick_worker(cfg):
             S.quick_result = {"ok": ok_n > 0, "success": ok_n, "fail": fail_n,
                               "title": survey["title"], "shortid": shortid,
                               "answers": rounds[0] if rounds else answers,
+                              "option_texts": round_texts[0] if round_texts else {},
                               "sig": cur_sig}   # 回填第 1 轮实际内容
         S.log(f"一键运行结束：成功 {ok_n}，失败 {fail_n}",
               "ok" if fail_n == 0 else "warn")
@@ -940,11 +1003,15 @@ class Handler(BaseHTTPRequestHandler):
             cur = survey_sig(S.survey) if S.survey else ""
             with LOCK:
                 items = {k: list(v) for k, v in S.fill_template.items()}
+                option_texts = {k: {v: list(c) for v, c in per.items()}
+                                for k, per in S.fill_option_texts.items()}
                 rnd = S.fill_random
                 tpl_sig = S.fill_tpl_sig
+            linked = sum(len(per) for per in option_texts.values())
             return self._json({
-                "ok": True, "items": items, "random": rnd,
-                "sig": tpl_sig, "current_sig": cur,
+                "ok": True, "items": items, "option_texts": option_texts,
+                "random": rnd, "sig": tpl_sig, "current_sig": cur,
+                "linked_options": linked,
                 # 模板是按旧问卷配的，题号可能已经对不上
                 "stale": bool(tpl_sig and cur and tpl_sig != cur),
             })
@@ -1233,7 +1300,12 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _api_fill_template(self, body):
-        """保存填空题模板。items 里每项是候选数组，空数组等于删掉该题。"""
+        """保存模板。
+
+        items        填空候选：{题号: [候选...]}
+        option_texts 联动选项补充候选：{题号: {选项值: [候选...]}}
+        空数组等于删掉该题/该选项。
+        """
         if not S.survey:
             return self._json({"ok": False, "error": "未加载问卷"}, 400)
 
@@ -1248,8 +1320,46 @@ class Handler(BaseHTTPRequestHandler):
             if vals:
                 items[str(k)] = vals
 
+        raw_opts = body.get("option_texts") or {}
+        if not isinstance(raw_opts, dict):
+            return self._json({"ok": False, "error": "option_texts 必须是对象"}, 400)
+
+        qmap = {str(q["topic"]): q for q in S.survey.get("questions") or []}
+        option_texts = {}
+        for topic, per in raw_opts.items():
+            topic = str(topic)
+            q = qmap.get(topic)
+            if not q:
+                return self._json({"ok": False,
+                                   "error": f"Q{topic} 不在当前问卷里"}, 400)
+            if not (q.get("has_option_text") or any(
+                    o.get("has_text") for o in (q.get("options") or []))):
+                return self._json({"ok": False,
+                                   "error": f"Q{topic} 没有联动补充选项"}, 400)
+            if not isinstance(per, dict):
+                return self._json({"ok": False,
+                                   "error": f"Q{topic} 的 option_texts 必须是对象"}, 400)
+            omap = {str(o["value"]): o for o in (q.get("options") or [])}
+            cleaned = {}
+            for val, cands in per.items():
+                val = str(val)
+                opt = omap.get(val)
+                if not opt:
+                    return self._json({"ok": False,
+                                       "error": f"Q{topic} 没有选项 {val}"}, 400)
+                if not opt.get("has_text"):
+                    return self._json({"ok": False,
+                                       "error": f"Q{topic} 选项 {val} 没有补充输入框"}, 400)
+                arr = [str(x).strip() for x in (cands if isinstance(cands, list) else [cands])]
+                arr = [x for x in arr if x]
+                if arr:
+                    cleaned[val] = arr
+            if cleaned:
+                option_texts[topic] = cleaned
+
         with LOCK:
             S.fill_template = items
+            S.fill_option_texts = option_texts
             S.fill_random = bool(body.get("random"))
             S.fill_tpl_sig = survey_sig(S.survey)
         try:
@@ -1258,9 +1368,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": f"写入失败：{e}"}, 500)
 
         total = sum(len(v) for v in items.values())
-        S.log(f"填空题模板已保存：{len(items)} 题 / {total} 个候选，"
+        linked = sum(len(per) for per in option_texts.values())
+        S.log(f"模板已保存：填空 {len(items)} 题 / {total} 个候选；"
+              f"联动补充 {linked} 个选项，"
               f"{'每轮随机' if S.fill_random else '固定取首项'}", "ok")
-        return self._json({"ok": True, "items": items, "random": S.fill_random,
+        return self._json({"ok": True, "items": items,
+                           "option_texts": option_texts,
+                           "linked_options": linked,
+                           "random": S.fill_random,
                            "sig": S.fill_tpl_sig})
 
     def _api_fetch(self, body):
@@ -1337,7 +1452,8 @@ class Handler(BaseHTTPRequestHandler):
               f"{think or '随机 5-12'}s，代理 {proxy or '直连'}", "info")
         threading.Thread(
             target=batch_worker,
-            args=(answers, count, gap, think, proxy, S.shortid, S.survey, samplers),
+            args=(answers, count, gap, think, proxy, S.shortid, S.survey, samplers,
+                  S.fill_option_texts, body.get("option_texts") or {}),
             daemon=True,
         ).start()
         return self._json({"ok": True})
@@ -1412,7 +1528,8 @@ class Handler(BaseHTTPRequestHandler):
         if not S.survey:
             return self._json({"ok": False, "error": "未加载问卷"}, 400)
         try:
-            payload = build_submitdata(body.get("answers") or {}, S.survey)
+            payload = build_submitdata(body.get("answers") or {}, S.survey,
+                                       body.get("option_texts") or {})
             return self._json({"ok": True, "payload": payload})
         except Exception as e:
             return self._json({"ok": False, "error": str(e)}, 400)
@@ -1494,24 +1611,99 @@ def merge_answers(survey, given):
     return out, used, dropped
 
 
+_OPT_PREFIX = re.compile(r"^\s*(?:[（(]\s*[A-Za-z]\s*[)）]|[A-Za-z])\s*[.、．:：)）]\s*")
+
+
+def _plain_option(text):
+    """选项文本去掉 A./B、/(C) 前缀，用作补充文本的兜底值。"""
+    s = re.sub(r"\s+", " ", str(text or "")).strip()
+    out = _OPT_PREFIX.sub("", s, count=1).strip()
+    return out or s
+
+
+def resolve_option_texts(survey, answers, pools=None, manual=None,
+                         random_fill=False, bags=None):
+    """给「选完选项还要补充填写」的题逐轮生成补充文本。
+
+    优先级：
+      1. 模板候选（fill_template.json 的 option_texts，可按轮次随机）
+      2. 界面上针对该选项手填的文本
+      3. 选项名兜底（必填时不能留空，否则提交必被打回）
+
+    关键：这一步在选项抽样之后执行，只读取已经选中的值，不会反过来影响
+    选项分布。所以概率配置的边缘概率保持不变，补充文本只是给选中的选项
+    配一段说明。
+    """
+    pools = pools or {}
+    manual = manual or {}
+    bags = bags if bags is not None else {}
+    out = {}
+
+    for q in survey.get("questions") or []:
+        has_linked = q.get("has_option_text") or any(
+            o.get("has_text") for o in (q.get("options") or []))
+        if not has_linked:
+            continue
+        topic = str(q["topic"])
+        val = answers.get(topic)
+        if val is None:
+            continue
+        vals = val if isinstance(val, list) else [val]
+        optmap = {str(o.get("value")): o for o in (q.get("options") or [])}
+        per = {}
+
+        for v in vals:
+            v = str(v)
+            opt = optmap.get(v)
+            if not opt or not opt.get("has_text"):
+                continue
+
+            cands = list((pools.get(topic) or {}).get(v) or [])
+            text = ""
+            if cands:
+                if random_fill:
+                    key = (topic, v)
+                    bag = bags.get(key) or []
+                    if not bag:
+                        bag = list(cands)
+                        random.shuffle(bag)
+                    text = bag.pop()
+                    bags[key] = bag
+                else:
+                    text = cands[0]
+            else:
+                one = (manual.get(topic) or {}).get(v)
+                if isinstance(one, str) and one.strip():
+                    text = one.strip()
+                elif opt.get("text_required"):
+                    # 必填补充框没配模板也没手填时，用选项名兜底。
+                    # 宁可语义一般，也不能交一份空着的必填项。
+                    text = _plain_option(opt.get("text")) or "未填写"
+
+            if text:
+                per[v] = text
+
+        if per:
+            out[topic] = per
+
+    return out
+
+
 def build_round_answers(survey, base, template, random_fill, count,
-                        choice_random=False, samplers=None):
+                        choice_random=False, samplers=None,
+                        option_pools=None, manual_texts=None):
     """把一份基础答案展开成 count 份。
 
-    三个随机维度互相独立：
-      samplers      → 按「轮次 + 题目」的概率配置抽，优先级最高
-      choice_random → 未配置概率的选择题（单选/多选/矩阵）每轮重新抽样
-      random_fill   → 填空题按模板的候选池逐轮取值
+    四个随机维度互相独立：
+      samplers       → 按「轮次 + 题目」的概率配置抽，优先级最高
+      choice_random  → 未配置概率的选择题（单选/多选/矩阵）每轮重新抽样
+      random_fill    → 填空题按模板的候选池逐轮取值
+      option_pools   → 联动选项的补充文本，按选中值逐轮取候选
 
-    random_fill=False 时填空取候选[0]；True 时洗牌队列依次取，取空再洗，
-    候选够多时前 N 轮不重样。洗牌而不是每轮独立 random.choice：
-    独立随机会出现「连续三轮同一个城市」，而「多轮各不相同」要的是覆盖。
+    补充文本在选项确定之后解析：概率只决定选哪个选项，文本不会反向
+    影响选项分布；多选的目标边缘概率也不会因为补文本而改变。
 
-    选择题默认用 random_answers()，它本身已满足限项（最多选 N 项）、
-    必答覆盖、矩阵行数这些约束。samplers 里的题目用各自编译好的抽样器，
-    不再走 random_answers，否则配置会被覆盖。
-
-    返回 (rounds, trace, used_topics)。
+    返回 (rounds, trace, used_topics, round_texts)。
     """
     topics = {str(q["topic"]) for q in survey.get("questions") or []}
     fill_topics = {
@@ -1534,7 +1726,8 @@ def build_round_answers(survey, base, template, random_fill, count,
     }
 
     n = max(1, int(count))
-    rounds, trace, bags = [], [], {}
+    rounds, trace, bags, round_texts = [], [], {}, []
+    text_bags = {}
     for idx in range(n):
         rnd = idx + 1
         ans = dict(base)
@@ -1562,7 +1755,9 @@ def build_round_answers(survey, base, template, random_fill, count,
             picked[t] = val
         rounds.append(ans)
         trace.append(picked)
-    return rounds, trace, sorted(pools)
+        round_texts.append(resolve_option_texts(
+            survey, ans, option_pools, manual_texts, random_fill, text_bags))
+    return rounds, trace, sorted(pools), round_texts
 
 
 def _default_answers(survey):

@@ -166,7 +166,7 @@ def main():
     samplers, issues = build_round_samplers(survey, store, "sig-x", 3)
     check("两轮都装配成功", set(samplers) == {1, 2} and not issues, issues)
     base = {"1": "3", "2": "4"}
-    rounds, _, _ = build_round_answers(survey, base, {}, False, 3, False, samplers)
+    rounds, _, _, _ = build_round_answers(survey, base, {}, False, 3, False, samplers)
     check("第 1 轮用第 1 轮配置", rounds[0]["1"] == "1", rounds[0])
     check("第 2 轮用第 2 轮配置", rounds[1]["1"] == "2", rounds[1])
     check("第 3 轮无配置回落到基准", rounds[2]["1"] == "3", rounds[2])

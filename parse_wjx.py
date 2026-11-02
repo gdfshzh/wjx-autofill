@@ -62,7 +62,12 @@ def extract_limit(prompt: str):
 
 
 def parse_options(field):
-    """单选/多选：从 .ui-radio / .ui-checkbox 提取 value 与显示文本。"""
+    """单选/多选：从 .ui-radio / .ui-checkbox 提取 value 与显示文本。
+
+    选项内可能带一个补充输入框（选完该项才显示，例如第 8 题
+    「实施机构是」四个选项都要求再填具体名称）。这种题的提交串是
+    `选项值^补充文本`，所以要把输入框的 id / 是否必填一起解析出来。
+    """
     opts = []
     for box in field.select("div.ui-radio, div.ui-checkbox"):
         inp = box.find("input")
@@ -72,11 +77,19 @@ def parse_options(field):
         # dit 属性是 URL 编码的原始选项文本，比 label 的渲染文本更干净
         raw = lab.get("dit")
         text = unquote(raw) if raw else clean(lab.get_text())
+        # 补充输入框：单选/多选都可能是 input 或 textarea
+        extra = box.select_one(
+            "input.OtherRadioText, textarea.OtherRadioText, "
+            "input.OtherText, textarea.OtherText")
         opts.append(
             {
                 "value": inp.get("value"),
                 "id": inp.get("id"),
                 "text": clean(text),
+                "has_text": bool(extra),
+                "text_id": extra.get("id") if extra else "",
+                "text_required": bool(extra is not None and extra.has_attr("required")),
+                "text_placeholder": (extra.get("placeholder") or "") if extra else "",
             }
         )
     if opts:
@@ -87,7 +100,9 @@ def parse_options(field):
         raw = lab.get("dit")
         text = clean(unquote(raw) if raw else lab.get_text())
         if text:
-            opts.append({"value": text, "id": lab.get("id"), "text": text})
+            opts.append({"value": text, "id": lab.get("id"), "text": text,
+                         "has_text": False, "text_id": "",
+                         "text_required": False, "text_placeholder": ""})
     return opts
 
 
@@ -189,6 +204,10 @@ def parse_html(html: str, source_url: str = "") -> dict:
             q["option_count"] = len(q["options"])
             # 有“其他”选项时通常伴随补充输入框
             q["has_other_input"] = any("其他" in o["text"] for o in q["options"])
+            linked = [o for o in q["options"] if o.get("has_text")]
+            q["has_option_text"] = bool(linked)
+            q["option_text_count"] = len(linked)
+            q["option_text_required"] = any(o.get("text_required") for o in linked)
         elif qtype in (5, 8):
             # 量表/滑块与排序题在移动端同样用可选项列表渲染，
             # 之前没取 options，复制题目时这两类只能输出题干。
@@ -228,10 +247,16 @@ def check_compat(survey: dict) -> dict:
             unsupported.append((q.get("topic"), q.get("type_name")))
         if q.get("has_other_input"):
             with_other.append(q.get("topic"))
+    with_option_text = [
+        q.get("topic") for q in survey.get("questions", [])
+        if q.get("has_option_text") or any(
+            o.get("has_text") for o in (q.get("options") or []))
+    ]
     return {
         "ok": not unsupported,
         "unsupported": unsupported,
         "with_other": with_other,
+        "with_option_text": with_option_text,
     }
 
 
