@@ -198,6 +198,13 @@ def write_text_files():
 
 
 def make_bundle():
+    # 许可证放到分发包根级：解压后第一眼能看到，也满足 PolyForm 的
+    # Notices 条款（拿到副本的人同时拿到条款）。app/ 里那份是给模块导入用的。
+    for f in ("LICENSE", "NOTICE"):
+        src = os.path.join(HERE, f)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(EMB, f))
+
     t0 = os.times()
     with zipfile.ZipFile(BUNDLE, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for base in ("python", "app"):
@@ -207,7 +214,7 @@ def make_bundle():
                     p = os.path.join(root, f)
                     arc = os.path.relpath(p, EMB).replace("\\", "/")
                     z.write(p, arc)
-        for f in ("启动.bat", "使用说明.txt"):
+        for f in ("启动.bat", "使用说明.txt", "LICENSE", "NOTICE"):
             p = os.path.join(EMB, f)
             if os.path.exists(p):
                 z.write(p, f)
