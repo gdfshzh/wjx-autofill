@@ -33,7 +33,7 @@ from humanize import fire_beacons, reading_time, warm_up  # noqa: E402
 from survey_text import format_survey  # noqa: E402
 from choice_weights import (  # noqa: E402
     CHOICE_TYPES,
-    build_round_samplers,
+    build_plans,
     config_stats,
     empty_store,
     load_store,
@@ -60,7 +60,10 @@ WEIGHT_PATH = os.path.join(HERE, "choice_weights.json")
 # ---------------------------------------------------------------- 项目信息
 # 单文件版与散装版共用这一份，前端弹窗从 /api/about 取，不在页面里写死多份
 APP_NAME = "问卷星批量作答控制台"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
+
+# 单批最大轮数：配额按这个值换算次数，上限只防误输入
+MAX_ROUNDS = 5000
 AUTHOR = "黄智皓"
 AUTHOR_NOTE = "本项目完全免费，禁止商用和学术造假"
 ABOUT = {
@@ -249,9 +252,16 @@ def load_weights():
     store = load_store(WEIGHT_PATH)
     with LOCK:
         S.choice_weights = store
-    if (store.get("rounds") or {}):
-        st = config_stats(store)
-        S.log(f"已加载选项概率配置：{st['pairs']} 处 / {len(st['configured_rounds'])} 个轮次", "dim")
+    items = store.get("items") or {}
+    if items:
+        topics = config_stats(store)["questions"]
+        desc = "、".join(f"Q{t}" for t in topics[:6])
+        S.log(f"已加载选项概率配置：{len(items)} 道题"
+              f"（{desc}{'…' if len(topics) > 6 else ''}）", "dim")
+    if store.get("migrated_from"):
+        # v1 的按轮次配置已合并成全局一份，告知用户行为变了
+        S.log(f"概率配置已从 {store['migrated_from']} 结构迁移到 v2："
+              f"同一道题在多个轮次配了不同值时，取出现次数最多的那份", "info")
 
 
 def weights_snapshot():
@@ -311,7 +321,7 @@ def _wait_if_paused():
     return not S.stop_event.is_set()
 
 
-def batch_worker(answers, count, gap, think, proxy, shortid, survey, samplers=None,
+def batch_worker(answers, count, gap, think, proxy, shortid, survey, plans=None,
                  option_pools=None, manual_texts=None):
     text_bags = {}
     try:
@@ -319,11 +329,11 @@ def batch_worker(answers, count, gap, think, proxy, shortid, survey, samplers=No
             if not _wait_if_paused():
                 break
 
-            # 每轮提交前按该轮的概率配置重新抽选择题。
-            # samplers 为空时 round_answers 就是原答案，行为与旧版一致。
+            # 配额方案在开跑前就算好了，这里按轮取确定值，不再是抽样。
+            # plans 为空时 round_answers 就是原答案。
             round_answers = dict(answers)
-            for t, smp in (samplers or {}).get(i, {}).items():
-                round_answers[t] = smp.draw()
+            for t, plan in (plans or {}).items():
+                round_answers[t] = plan.at(i)
             round_texts = resolve_option_texts(
                 survey, round_answers, option_pools, manual_texts,
                 S.fill_random, text_bags)
@@ -741,36 +751,35 @@ def quick_worker(cfg):
         S.set_step("answer", "done", detail)
 
         # ---------- ④ 提交
-        count = max(1, int(cfg.get("count", 1)))
+        # 概率配额按总轮数换算，轮数上限只防手滑输入六位数；
+        # 400、1000 轮这类正常批次不该被拦
+        count = max(1, min(int(cfg.get("count", 1)), MAX_ROUNDS))
         gap = max(0, int(cfg.get("gap", 60)))
         think = int(cfg.get("think", 0))
         engine = (cfg.get("engine") or "browser").lower()
 
-        # 两个引擎共用同一份展开结果：选择题重抽 + 填空按模板
+        # 两个引擎共用同一份展开结果：选择题配额 + 填空按模板
         choice_random = bool(cfg.get("choice_random"))
         # 概率配置在服务端重新读盘校验，不信任前端传来的配置：
         # 换过问卷、题目选项变过、手工改过 JSON，都在这里被拦下。
         wstore = weights_snapshot()
-        samplers, wissues = build_round_samplers(survey, wstore, cur_sig, count)
+        plans, wissues = build_plans(survey, wstore, cur_sig, count)
         for msg in wissues[:6]:
             S.log(f"概率配置：{msg}", "warn")
         if len(wissues) > 6:
             S.log(f"概率配置：另有 {len(wissues) - 6} 条提示未显示", "dim")
-        if samplers:
-            pairs = sum(len(v) for v in samplers.values())
-            rounds_desc = "、".join(f"第{r}轮" for r in sorted(samplers)[:6])
-            S.log(f"选项概率配置生效：{pairs} 处 · {rounds_desc}"
-                  f"{'…' if len(samplers) > 6 else ''}", "info")
-            for r in sorted(samplers)[:3]:
-                S.log(f"  第 {r} 轮 " + "、".join(
-                    f"Q{t}" for t in sorted(samplers[r], key=lambda x: int(x))), "dim")
-        extra_rounds = sorted(set(config_stats(wstore)["configured_rounds"])
-                              - set(range(1, count + 1)))
-        if extra_rounds:
-            S.log(f"第 {'、'.join(str(x) for x in extra_rounds[:8])} 轮的配置"
-                  f"超出本次 {count} 轮，不会生效", "warn")
+        if plans:
+            # 配额按总轮数一次算完，日志里直接给出每个选项会出现多少次
+            S.log(f"选项概率配置生效：{len(plans)} 道题，按 {count} 轮精确分配", "info")
+            for t in sorted(plans, key=lambda x: int(x))[:4]:
+                cnt = plans[t].counts()
+                desc = "、".join(f"{v}×{n}" for v, n in
+                                 sorted(cnt.items(), key=lambda kv: -kv[1]) if n)
+                S.log(f"  Q{t} {desc}", "dim")
+            if len(plans) > 4:
+                S.log(f"  …另有 {len(plans) - 4} 道题", "dim")
         rounds, trace, ftopics, round_texts = build_round_answers(
-            survey, answers, tpl, S.fill_random, count, choice_random, samplers,
+            survey, answers, tpl, S.fill_random, count, choice_random, plans,
             option_pools=otpl, manual_texts=manual_texts)
 
         if choice_random:
@@ -1038,10 +1047,11 @@ class Handler(BaseHTTPRequestHandler):
             st = config_stats(store)
             return self._json({
                 "ok": True,
+                "version": store.get("version") or 2,
                 "sig": store.get("sig") or "",
                 "current_sig": cur,
                 "stale": bool(store.get("sig") and cur and store["sig"] != cur),
-                "rounds": store.get("rounds") or {},
+                "items": store.get("items") or {},
                 "updated": store.get("updated") or "",
                 "title": (S.survey or {}).get("title") or "",
                 **st,
@@ -1098,13 +1108,12 @@ class Handler(BaseHTTPRequestHandler):
         return {str(q["topic"]): q for q in (S.survey or {}).get("questions") or []}
 
     def _api_weights(self, body):
-        """概率配置的增删改与轮次复制。
+        """概率配置的增删改。
 
-        action=set     {round, topic, config}   config 为空/clear=true 等于删除
-        action=clear   {round, topic} / {round} / {all:true}
-        action=copy    {from, to:[...]} 或 {from, to:"all", count:N}
+        action=set     {topic, config}   config 为空/clear=true 等于删除
+        action=clear   {topic} / {all:true}
 
-        每次只改目标轮次的目标题目；其他轮次是独立对象，不会被连带修改。
+        v2 起一道题只有一份配置，对所有轮次生效，不再按轮次分开存。
         """
         if not S.survey:
             return self._json({"ok": False, "error": "未加载问卷"}, 400)
@@ -1119,21 +1128,11 @@ class Handler(BaseHTTPRequestHandler):
             # 换问卷后旧配置的题号/选项都可能对不上，整份作废比逐条猜安全
             store = empty_store()
         store["sig"] = cur_sig
-        rounds = store.setdefault("rounds", {})
+        items = store.setdefault("items", {})
         warnings = []
         touched = ""
 
-        def round_no(raw):
-            try:
-                n = int(raw)
-            except (TypeError, ValueError):
-                return None
-            return n if 1 <= n <= 999 else None
-
         if action == "set":
-            rn = round_no(body.get("round"))
-            if not rn:
-                return self._json({"ok": False, "error": "round 必须是 1-999 的整数"}, 400)
             topic = str(body.get("topic") or "")
             q = qmap.get(topic)
             if not q:
@@ -1144,93 +1143,27 @@ class Handler(BaseHTTPRequestHandler):
 
             cfg = body.get("config")
             if cfg is None or (isinstance(cfg, dict) and cfg.get("clear")):
-                r = rounds.get(str(rn)) or {}
-                r.pop(topic, None)
-                if r:
-                    rounds[str(rn)] = r
-                else:
-                    rounds.pop(str(rn), None)
-                touched = f"第 {rn} 轮 Q{topic} 已恢复默认均匀"
+                items.pop(topic, None)
+                touched = f"Q{topic} 已恢复默认均匀"
             else:
                 clean, errs, warns = validate_config(q, cfg, normalize=True)
                 if errs:
                     return self._json({"ok": False, "error": errs[0],
                                        "errors": errs}, 400)
-                rounds.setdefault(str(rn), {})[topic] = clean
+                items[topic] = clean
                 warnings.extend(warns)
-                touched = f"第 {rn} 轮 Q{topic} 概率已保存"
+                touched = f"Q{topic} 概率已保存"
 
         elif action == "clear":
             if body.get("all"):
-                rounds.clear()
+                items.clear()
                 touched = "已清空全部概率配置"
             else:
-                rn = round_no(body.get("round"))
-                if not rn:
-                    return self._json({"ok": False, "error": "round 必须是 1-999 的整数"}, 400)
                 topic = str(body.get("topic") or "")
-                if topic:
-                    r = rounds.get(str(rn)) or {}
-                    r.pop(topic, None)
-                    if r:
-                        rounds[str(rn)] = r
-                    else:
-                        rounds.pop(str(rn), None)
-                    touched = f"第 {rn} 轮 Q{topic} 已恢复默认均匀"
-                else:
-                    rounds.pop(str(rn), None)
-                    touched = f"第 {rn} 轮的概率配置已清空"
-
-        elif action == "copy":
-            src = round_no(body.get("from") if body.get("from") is not None
-                           else body.get("from_round"))
-            if not src:
-                return self._json({"ok": False, "error": "from 必须是 1-999 的整数"}, 400)
-            src_cfg = rounds.get(str(src)) or {}
-            if not src_cfg:
-                return self._json({"ok": False,
-                                   "error": f"第 {src} 轮还没有可复制的配置"}, 400)
-
-            # 带 topic 时只复制这一题，目标轮次的其他题保持原样。
-            # 不带 topic 才是整轮复制（调用方需要明确知道会覆盖目标轮）。
-            topic = str(body.get("topic") or "")
-            if topic:
-                if topic not in src_cfg:
-                    return self._json({"ok": False,
-                                       "error": f"第 {src} 轮 Q{topic} 没有配置"}, 400)
-                unit = {topic: src_cfg[topic]}
-            else:
-                unit = src_cfg
-
-            to = body.get("to")
-            targets = []
-            if to == "all":
-                n = round_no(body.get("count"))
-                if not n:
-                    return self._json({"ok": False,
-                                       "error": "套用到全部轮次时 count 必须是 1-999"}, 400)
-                targets = list(range(1, n + 1))
-            elif isinstance(to, list):
-                targets = [round_no(x) for x in to]
-            elif to not in (None, ""):
-                targets = [round_no(to)]
-            else:
-                return self._json({"ok": False, "error": "缺少 to"}, 400)
-
-            targets = [x for x in targets if x and x != src]
-            if not targets:
-                return self._json({"ok": False, "error": "没有需要复制的目标轮次"}, 400)
-            if len(targets) > 200:
-                return self._json({"ok": False, "error": "一次最多复制到 200 个轮次"}, 400)
-
-            for t in targets:
-                if topic:
-                    rounds.setdefault(str(t), {}).update(copy.deepcopy(unit))
-                else:
-                    rounds[str(t)] = copy.deepcopy(src_cfg)
-            touched = (f"第 {src} 轮 Q{topic} 已复制到 {len(targets)} 个轮次"
-                       if topic else
-                       f"第 {src} 轮配置已复制到 {len(targets)} 个轮次")
+                if not topic:
+                    return self._json({"ok": False, "error": "缺少 topic"}, 400)
+                items.pop(topic, None)
+                touched = f"Q{topic} 已恢复默认均匀"
 
         else:
             return self._json({"ok": False, "error": f"未知 action：{action}"}, 400)
@@ -1247,17 +1180,22 @@ class Handler(BaseHTTPRequestHandler):
             S.log("问卷已更换，上一份问卷的概率配置已整体作废", "warn")
         return self._json({
             "ok": True,
+            "version": store.get("version") or 2,
             "sig": cur_sig,
             "current_sig": cur_sig,
             "stale": False,
-            "rounds": store.get("rounds") or {},
+            "items": store.get("items") or {},
             "updated": store.get("updated") or "",
             "warnings": warnings,
             **st,
         })
 
     def _api_weight_preview(self, body):
-        """按给定配置（未保存也行）跑一次蒙特卡洛，返回目标 vs 实际分布。"""
+        """按给定配置（未保存也行）算一次精确配额，返回每选项的次数与占比。
+
+        rounds 取请求里的值；没传就用当前任务的次数，再没有按 100 轮估。
+        返回的是确定值，不是抽样估计 —— 400 轮 70% 会直接给出 280 次。
+        """
         if not S.survey:
             return self._json({"ok": False, "error": "未加载问卷"}, 400)
         topic = str(body.get("topic") or "")
@@ -1270,27 +1208,27 @@ class Handler(BaseHTTPRequestHandler):
 
         cfg = body.get("config")
         if cfg is None:
-            try:
-                rn = int(body.get("round") or 1)
-            except (TypeError, ValueError):
-                rn = 1
             store = weights_snapshot()
-            cfg = ((store.get("rounds") or {}).get(str(rn)) or {}).get(topic)
+            cfg = (store.get("items") or {}).get(topic)
             if not cfg:
                 return self._json({"ok": False,
-                                   "error": f"第 {rn} 轮 Q{topic} 尚未配置"}, 400)
+                                   "error": f"Q{topic} 尚未配置"}, 400)
 
         clean, errs, warns = validate_config(q, cfg, normalize=True)
         if errs:
             return self._json({"ok": False, "error": errs[0], "errors": errs}, 400)
 
-        samples = body.get("samples") or 800
+        rounds = body.get("rounds") or body.get("samples")
+        if not rounds:
+            with LOCK:
+                rounds = getattr(S, "total", 0) or 100
         try:
-            samples = int(samples)
+            rounds = int(rounds)
         except (TypeError, ValueError):
-            samples = 800
-        pv = preview_question(q, clean, samples=samples,
-                              seed=body.get("seed"))
+            rounds = 100
+        rounds = max(1, min(rounds, 20000))
+
+        pv = preview_question(q, clean, rounds=rounds, seed=body.get("seed"))
         return self._json({
             "ok": True,
             "topic": topic,
@@ -1427,12 +1365,12 @@ class Handler(BaseHTTPRequestHandler):
         proxy = (body.get("proxy") or "").strip() or None
 
         cur_sig = survey_sig(S.survey)
-        samplers, wissues = build_round_samplers(
+        plans, wissues = build_plans(
             S.survey, weights_snapshot(), cur_sig, count)
         for msg in wissues[:4]:
             S.log(f"概率配置：{msg}", "warn")
-        if samplers:
-            S.log(f"选项概率配置生效：{sum(len(v) for v in samplers.values())} 处",
+        if plans:
+            S.log(f"选项概率配置生效：{len(plans)} 道题，按 {count} 轮精确分配",
                   "info")
 
         with LOCK:
@@ -1452,7 +1390,7 @@ class Handler(BaseHTTPRequestHandler):
               f"{think or '随机 5-12'}s，代理 {proxy or '直连'}", "info")
         threading.Thread(
             target=batch_worker,
-            args=(answers, count, gap, think, proxy, S.shortid, S.survey, samplers,
+            args=(answers, count, gap, think, proxy, S.shortid, S.survey, plans,
                   S.fill_option_texts, body.get("option_texts") or {}),
             daemon=True,
         ).start()
@@ -1690,12 +1628,12 @@ def resolve_option_texts(survey, answers, pools=None, manual=None,
 
 
 def build_round_answers(survey, base, template, random_fill, count,
-                        choice_random=False, samplers=None,
+                        choice_random=False, plans=None,
                         option_pools=None, manual_texts=None):
     """把一份基础答案展开成 count 份。
 
     四个随机维度互相独立：
-      samplers       → 按「轮次 + 题目」的概率配置抽，优先级最高
+      plans          → 按「题目」的概率配额取确定值，优先级最高
       choice_random  → 未配置概率的选择题（单选/多选/矩阵）每轮重新抽样
       random_fill    → 填空题按模板的候选池逐轮取值
       option_pools   → 联动选项的补充文本，按选中值逐轮取候选
@@ -1738,8 +1676,12 @@ def build_round_answers(survey, base, template, random_fill, count,
                     ans[t] = fresh[t]
         # 概率配置最后覆盖：即使关掉「每轮随机」，已配置的题目也按配置抽，
         # 这是「按轮次启用」的含义；未配置的题目仍沿用上面的开关行为。
-        for t, smp in (samplers or {}).get(rnd, {}).items():
-            ans[t] = smp.draw()
+        # 配额方案按轮取确定值：同一道题在整个批次里的出现次数在开跑前
+        # 就固定了，不像逐轮抽样那样有波动。
+        for t, plan in (plans or {}).items():
+            val = plan.at(rnd)
+            if val is not None:
+                ans[t] = val
         picked = {}
         for t, pool in pools.items():
             if random_fill:

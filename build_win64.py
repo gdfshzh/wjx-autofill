@@ -49,7 +49,7 @@ PY_VER = "3.13.12"
 
 SOURCE_FILES = [
     "server.py", "parse_wjx.py", "wjx_autofill.py", "wjx_browser.py",
-    "choice_weights.py", "survey_text.py", "humanize.py", "qr_decode.py",
+    "choice_weights.py", "quota.py", "survey_text.py", "humanize.py", "qr_decode.py",
     "console.py", "run.py", "parallel.py", "probe_parallel.py", "survey.json",
     "LICENSE", "NOTICE",
 ]

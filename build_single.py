@@ -51,6 +51,7 @@ CODE_FILES = [
     "wjx_autofill.py",
     "wjx_browser.py",
     "choice_weights.py",
+    "quota.py",
     "survey_text.py",
     "humanize.py",
     "qr_decode.py",

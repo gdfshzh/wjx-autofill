@@ -770,19 +770,18 @@ function missingRequiredFill() {
 /* 配置存在后端 choice_weights.json，键是「轮次 → 题号」，每轮是独立对象。
    前端只做展示与输入校验；归一化、可行性检查、抽样都以服务端返回为准。 */
 const WT = {
-  rounds: {},          // {"1": {"3": {mode, weights, count, sig}}}
+  items: {},           // {"8": {mode, weights, count, sig}}，全局一份，对所有轮次生效
   sig: '',
   currentSig: '',
   stale: false,
-  round: 1,
   topic: null,
-  draft: null,         // 当前编辑中的副本，未保存不影响 WT.rounds
+  draft: null,         // 当前编辑中的副本，未保存不影响 WT.items
   dirty: false,
   preview: null,
   timer: null,
   seq: 0,
   backendOld: false,   // 后端没有 /api/weights：旧进程还在跑，重启程序即可
-  stats: { pairs: 0, configured_rounds: [], questions: [] },
+  stats: { pairs: 0, questions: [] },
 };
 
 function weightQuestions() {
@@ -801,15 +800,17 @@ function wtValues(q) {
   return q.options.map((o) => ({ value: String(o.value), text: o.text }));
 }
 
-function roundCfg(round) {
-  const v = WT.rounds[String(round)];
+/** 该题的配置。v2 不再按轮次分开，一道题只有一份。 */
+function itemCfg(topic) {
+  const v = WT.items[String(topic)];
   return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
 }
 
-function maxRound() {
-  const nums = Object.keys(WT.rounds).map((x) => parseInt(x, 10)).filter((x) => x > 0);
-  const count = parseInt(($('#bcount') && $('#bcount').value) || '1', 10) || 1;
-  return Math.min(999, Math.max(1, count, WT.round, ...(nums.length ? nums : [1])));
+/** 配额换算用的总轮数，直接取控制坞「次数」输入框的值。 */
+function plannedRounds() {
+  const el = $('#bcount');
+  const n = parseInt((el && el.value) || '1', 10) || 1;
+  return Math.max(1, Math.min(5000, n));
 }
 
 function updateWBadge() {
@@ -822,7 +823,7 @@ function updateWBadge() {
   btn.classList.toggle('stale', !!WT.stale);
   btn.title = WT.stale
     ? '概率配置属于上一份问卷，保存新配置后会整体重建'
-    : '按轮次给每道选择题设置选项出现概率';
+    : '给每道选择题设置选项出现比例，按总轮数精确分配次数';
 }
 
 async function loadWeights() {
@@ -838,13 +839,12 @@ async function loadWeights() {
       return;
     }
     WT.backendOld = false;
-    WT.rounds = r.rounds || {};
+    WT.items = r.items || {};
     WT.sig = r.sig || '';
     WT.currentSig = r.current_sig || '';
     WT.stale = !!r.stale;
     WT.stats = {
       pairs: r.pairs || 0,
-      configured_rounds: r.configured_rounds || [],
       questions: r.questions || [],
     };
     updateWBadge();
@@ -865,10 +865,7 @@ function openWeights() {
   // 两个抽屉共用同一层遮罩，同时开会互相盖住，先收起另一个
   if ($('#tplDrawer') && !$('#tplDrawer').hidden) closeTpl();
 
-  WT.round = Math.max(1, Math.min(999, WT.round || 1));
-  $('#wRound').value = WT.round;
-  const conf = roundCfg(WT.round);
-  const configured = Object.keys(conf).filter((t) => weightQ(t));
+  const configured = Object.keys(WT.items).filter((t) => weightQ(t));
   WT.topic = configured.length ? configured[0] : String(weightQuestions()[0].topic);
   WT.draft = null;
   WT.dirty = false;
@@ -899,9 +896,8 @@ function closeWeights() {
 function renderWQList() {
   const box = $('#wQList');
   if (!box) return;
-  const conf = roundCfg(WT.round);
   box.innerHTML = weightQuestions().map((q) => {
-    const on = conf[String(q.topic)] ? ' on' : '';
+    const on = WT.items[String(q.topic)] ? ' on' : '';
     const sel = String(q.topic) === String(WT.topic) ? ' on' : '';
     const prompt = q.prompt.replace(/\s+/g, ' ').slice(0, 18);
     return `<button class="w-q${sel}" data-topic="${q.topic}">
@@ -916,13 +912,11 @@ function renderWQList() {
 
 function renderWStat() {
   const stat = $('#wStat');
-  const hint = $('#wRoundHint');
-  if (!stat || !hint) return;
-  const conf = roundCfg(WT.round);
-  const n = Object.keys(conf).filter((t) => weightQ(t)).length;
+  if (!stat) return;
+  const n = Object.keys(WT.items).filter((t) => weightQ(t)).length;
   const total = weightQuestions().length;
-  stat.textContent = `第 ${WT.round} 轮 · 已配置 ${n}/${total} 题`;
-  hint.textContent = `共 ${maxRound()} 轮 · 本轮 ${n} 题`;
+  const rounds = plannedRounds();
+  stat.textContent = `已配置 ${n}/${total} 题 · 按 ${rounds} 轮换算`;
 }
 
 function selectWQ(topic) {
@@ -945,7 +939,7 @@ function currentDraft() {
   if (!q) return null;
   if (WT.draft) return WT.draft;
 
-  const stored = roundCfg(WT.round)[String(q.topic)];
+  const stored = WT.items[String(q.topic)];
   const vals = wtValues(q);
   if (stored) {
     const weights = {};
@@ -993,17 +987,17 @@ function defaultWMode(q) {
 
 function modeHint(q, cfg) {
   if (cfg.mode === 'multi_target') {
-    return '目标出现概率：每个选项在每一轮被选中的比例。所有概率之和 = 平均选中项数，'
-      + '限项约束下列选项之间会互相牵连，实际分布以下方「实测」为准。';
+    return '目标出现概率：每个选项在整批里被选中的比例。总和 = 平均选中项数，'
+      + '右侧「×次数」是按当前轮数换算出的精确次数。';
   }
   if (cfg.mode === 'multi_weight') {
-    return '相对权重：先按题干确定选几项，再按权重不放回抽。权重只决定倾向，不保证精确比例。';
+    return '相对权重：先按题干确定每轮选几项，再按权重分配。只决定倾向，不定次数。';
   }
   if (cfg.mode === 'matrix') {
     const rows = q.matrix ? q.matrix.rows.length : 0;
-    return `矩阵 ${rows} 个子项共用这一组分值分布，每行独立抽一次。`;
+    return `矩阵 ${rows} 个子项共用这一组分值分布，每行独立分配。`;
   }
-  return '权重会自动归一化成出现概率，未配置的轮次仍走默认均匀随机。';
+  return '权重会自动归一化成出现比例，再按总轮数换算成精确次数。';
 }
 
 function renderWEditor() {
@@ -1015,24 +1009,14 @@ function renderWEditor() {
   }
   const cfg = currentDraft();
   const vals = wtValues(q);
+  const rounds = plannedRounds();
   const tag = q.type_name === '多选'
     ? `多选 · ${q.max_select ? '最多' + q.max_select + '项' : (q.exact_select ? '限选' + q.exact_select + '项' : '不限项')}`
     : q.type_name;
 
   let html = `<div class="w-qhead"><b>Q${q.topic}</b><span class="w-type">${esc(tag)}</span></div>
-    <div class="w-prompt">${esc(q.prompt)}</div>`;
-
-  const used = Object.keys(WT.rounds)
-    .filter((r) => roundCfg(r)[String(q.topic)])
-    .map((r) => parseInt(r, 10))
-    .filter((r) => r > 0)
-    .sort((a, b) => a - b);
-  html += `<div class="w-used">
-    <span>已配置轮次：${used.length
-      ? used.map((r) => `第 ${r} 轮`).join('、')
-      : '无（当前使用默认均匀）'}</span>
-    ${used.length ? '<button class="w-linkbtn" id="wCopyQ">本题套用到全部轮次</button>' : ''}
-  </div>`;
+    <div class="w-prompt">${esc(q.prompt)}</div>
+    <div class="w-used"><span>整批 ${rounds} 轮通用，不需要逐轮配置</span></div>`;
 
   if (q.type_name === '多选') {
     html += `<div class="w-modes">
@@ -1058,12 +1042,13 @@ function renderWEditor() {
       <span class="w-opt">${esc(v.text)}</span>
       <input class="w-num" type="number" min="0" step="1" value="${num}">
       <span class="w-pct">${pct}</span>
+      <span class="w-times">×—</span>
       <input class="w-range" type="range" min="0" max="100" step="1" value="${Math.min(100, num)}">
       <div class="w-bars"><i class="wt"></i><i class="wa"></i></div>
     </div>`;
   }
   html += `</div>
-    <p class="w-hint" id="wPreview">改动后自动实测 600 次，用于核对实际分布</p>`;
+    <p class="w-hint" id="wPreview">改动后按当前轮数算一次配额，右侧显示每项要出现多少次</p>`;
 
   box.innerHTML = html;
 
@@ -1113,8 +1098,6 @@ function renderWEditor() {
       });
     }
   }
-  const copyQ = $('#wCopyQ');
-  if (copyQ) copyQ.addEventListener('click', copyWQuestionAll);
   paintPreviewBars();
 }
 
@@ -1143,21 +1126,23 @@ function paintRow(row, cfg, val) {
 }
 
 function paintPreviewBars() {
-  const q = weightQ(WT.topic);
-  const cfg = currentDraft();
-  if (!q || !cfg) return;
   const pv = WT.preview;
   $$('#wRows .w-row').forEach((row) => {
     const val = row.dataset.val;
     const wt = row.querySelector('.wt');
     const wa = row.querySelector('.wa');
+    const times = row.querySelector('.w-times');
     // 目标条优先用服务端归一化后的目标值：固定选 2 项时用户填的 80+70
-    // 会被缩放成 53+47，画原值会和实际抽样对不上
-    const target = pv && pv.target ? (pv.target[val] || 0) : targetShare(cfg, val);
-    if (wt) wt.style.setProperty('--w', `${(target * 100).toFixed(1)}%`);
+    // 会被缩放成 53+47，画原值会和实际分配对不上
+    const target = pv && pv.target ? (pv.target[val] || 0) : null;
+    if (wt && target != null) wt.style.setProperty('--w', `${(target * 100).toFixed(1)}%`);
     if (wa) {
       const a = pv && pv.actual ? (pv.actual[val] || 0) : 0;
       wa.style.setProperty('--w', `${(a * 100).toFixed(1)}%`);
+    }
+    if (times) {
+      const c = pv && pv.counts ? pv.counts[val] : null;
+      times.textContent = c == null ? '×—' : `×${c}`;
     }
   });
 }
@@ -1174,7 +1159,7 @@ async function runWPreview() {
     const r = await post('/api/weights/preview', {
       topic: q.topic,
       config: payloadW(cfg),
-      samples: 600,
+      rounds: plannedRounds(),
     });
     if (seq !== WT.seq) return;
     if (!r.ok) {
@@ -1183,7 +1168,7 @@ async function runWPreview() {
         WT.backendOld = true;
         showWMsg('后端没有 /api/weights/preview，当前进程还是旧版。关闭程序重启后再试。', 'err');
       } else {
-        showWMsg(msg || '实测失败', 'err');
+        showWMsg(msg || '配额计算失败', 'err');
       }
       return;
     }
@@ -1192,7 +1177,7 @@ async function runWPreview() {
     paintPreviewBars();
     const line = $('#wPreview');
     if (line) {
-      let txt = `实测 ${r.samples} 次`;
+      let txt = `按 ${r.rounds} 轮精确分配`;
       if (q.type_name === '多选') txt += ` · 平均选 ${r.mean_count} 项`;
       if (r.target) {
         let maxErr = 0;
@@ -1208,7 +1193,7 @@ async function runWPreview() {
     if (warns.length) showWMsg(warns.join('；'), 'warn');
     else showWMsg('');
   } catch (e) {
-    if (seq === WT.seq) showWMsg('实测请求失败', 'err');
+    if (seq === WT.seq) showWMsg('配额请求失败', 'err');
   }
 }
 
@@ -1219,7 +1204,6 @@ function schedulePreview() {
 }
 
 function payloadW(cfg) {
-  const q = weightQ(WT.topic);
   const out = {};
   for (const [k, v] of Object.entries(cfg.weights)) {
     // 目标概率在接口里用 0-1；其余模式传原始权重，由后端归一化
@@ -1289,7 +1273,6 @@ async function saveWQ() {
   try {
     const r = await post('/api/weights', {
       action: 'set',
-      round: WT.round,
       topic: q.topic,
       config: payloadW(cfg),
     });
@@ -1303,24 +1286,10 @@ async function saveWQ() {
       showWMsg((r.errors && r.errors.length ? r.errors.join('；') : msg) || '保存失败', 'err');
       return;
     }
-    WT.rounds = r.rounds || {};
-    WT.sig = r.sig || '';
-    WT.stats = {
-      pairs: r.pairs || 0,
-      configured_rounds: r.configured_rounds || [],
-      questions: r.questions || [],
-    };
-    WT.stale = false;
-    WT.draft = null;
-    WT.dirty = false;
-    WT.preview = null;
-    updateWBadge();
-    renderWQList();
-    renderWEditor();
-    renderWStat();
-    schedulePreview();
+    applyWStore(r);
     const warns = r.warnings || [];
-    toast(warns.length ? `已保存 · ${warns[0]}` : `第 ${WT.round} 轮 Q${q.topic} 概率已保存`);
+    toast(warns.length ? `已保存 · ${warns[0]}`
+      : `Q${q.topic} 概率已保存 · 按 ${plannedRounds()} 轮换算`);
   } finally {
     btn.disabled = false;
   }
@@ -1329,71 +1298,27 @@ async function saveWQ() {
 async function clearWQ() {
   const q = weightQ(WT.topic);
   if (!q) return;
-  if (!window.confirm(`删除第 ${WT.round} 轮 Q${q.topic} 的概率配置？`)) return;
-  const r = await post('/api/weights', {
-    action: 'clear', round: WT.round, topic: q.topic,
-  });
+  if (!window.confirm(`删除 Q${q.topic} 的概率配置？`)) return;
+  const r = await post('/api/weights', { action: 'clear', topic: q.topic });
   if (!r.ok) { showWMsg(r.error || '清除失败', 'err'); return; }
   applyWStore(r);
-  toast(`第 ${WT.round} 轮 Q${q.topic} 已恢复默认均匀`);
+  toast(`Q${q.topic} 已恢复默认均匀`);
 }
 
-async function clearWRound() {
-  if (!window.confirm(`清空第 ${WT.round} 轮的全部概率配置？`)) return;
-  const r = await post('/api/weights', { action: 'clear', round: WT.round });
+async function clearWAll() {
+  if (!window.confirm('清空全部题目的概率配置？')) return;
+  const r = await post('/api/weights', { action: 'clear', all: true });
   if (!r.ok) { toast(r.error || '清除失败', true); return; }
   applyWStore(r);
-  toast(`第 ${WT.round} 轮的概率配置已清空`);
-}
-
-async function copyWNext() {
-  const target = Math.min(999, WT.round + 1);
-  const r = await post('/api/weights', {
-    action: 'copy', from: WT.round, to: [target],
-  });
-  if (!r.ok) { toast(r.error || '复制失败', true); return; }
-  applyWStore(r);
-  WT.round = target;
-  $('#wRound').value = target;
-  WT.draft = null;
-  WT.dirty = false;
-  renderWQList(); renderWEditor(); renderWStat();
-  toast(`已复制到第 ${target} 轮`);
-}
-
-async function copyWAll() {
-  const n = maxRound();
-  if (!window.confirm(`用第 ${WT.round} 轮的配置覆盖第 1-${n} 轮？各轮之后仍是独立配置。`)) return;
-  const r = await post('/api/weights', {
-    action: 'copy', from: WT.round, to: 'all', count: n,
-  });
-  if (!r.ok) { toast(r.error || '复制失败', true); return; }
-  applyWStore(r);
-  toast(`已套用到第 1-${n} 轮（各轮仍是独立配置）`);
-}
-
-async function copyWQuestionAll() {
-  const q = weightQ(WT.topic);
-  if (!q) return;
-  if (WT.dirty) { toast('先保存本题，再复制到其他轮次', true); return; }
-  const n = maxRound();
-  if (!window.confirm(`把第 ${WT.round} 轮 Q${q.topic} 的配置复制到第 1-${n} 轮？`
-    + '其他题目不受影响。')) return;
-  const r = await post('/api/weights', {
-    action: 'copy', from: WT.round, topic: q.topic, to: 'all', count: n,
-  });
-  if (!r.ok) { toast(r.error || '复制失败', true); return; }
-  applyWStore(r);
-  toast(`Q${q.topic} 已复制到第 1-${n} 轮`);
+  toast('概率配置已清空');
 }
 
 function applyWStore(r) {
-  WT.rounds = r.rounds || {};
+  WT.items = r.items || {};
   WT.sig = r.sig || '';
   WT.stale = false;
   WT.stats = {
     pairs: r.pairs || 0,
-    configured_rounds: r.configured_rounds || [],
     questions: r.questions || [],
   };
   WT.draft = null;
@@ -1415,7 +1340,7 @@ function setWUniform() {
   if (cfg.mode === 'multi_target') {
     each = uniformMultiPct(q, vals.length);
   } else {
-    each = +(100 / vals.length).toFixed(2);
+    each = +(100 / (vals.length || 1)).toFixed(2);
   }
   vals.forEach((v) => { cfg.weights[v.value] = each; });
   WT.dirty = true;
@@ -1426,33 +1351,7 @@ function setWUniform() {
 
 function updateWStatPreview() {
   const line = $('#wPreview');
-  if (line) line.textContent = '改动后自动实测 600 次，用于核对实际分布';
-}
-
-function changeWRound() {
-  if (WT.dirty && !window.confirm('当前题目有未保存的修改，切换轮次会丢弃。继续？')) {
-    $('#wRound').value = WT.round;
-    return;
-  }
-  let n = parseInt($('#wRound').value, 10);
-  if (!Number.isFinite(n) || n < 1) n = 1;
-  n = Math.min(999, n);
-  WT.round = n;
-  $('#wRound').value = n;
-  WT.draft = null;
-  WT.dirty = false;
-  WT.preview = null;
-  // 切轮次时保持当前题：用户通常是在同一道题上比较不同轮的配置，
-  // 每切一次就跳到「本轮第一道已配置题」会让人找不到刚才在改什么
-  if (!weightQ(WT.topic)) {
-    const conf = roundCfg(n);
-    const first = Object.keys(conf).filter((t) => weightQ(t))[0];
-    WT.topic = first || (weightQuestions()[0] ? String(weightQuestions()[0].topic) : null);
-  }
-  renderWQList();
-  renderWEditor();
-  renderWStat();
-  schedulePreview();
+  if (line) line.textContent = '改动后按当前轮数算一次配额，右侧显示每项要出现多少次';
 }
 
 function initWeights() {
@@ -1463,10 +1362,7 @@ function initWeights() {
   $('#wSave').addEventListener('click', saveWQ);
   $('#wUniform').addEventListener('click', setWUniform);
   $('#wRestore').addEventListener('click', clearWQ);
-  $('#wClearRound').addEventListener('click', clearWRound);
-  $('#wCopyNext').addEventListener('click', copyWNext);
-  $('#wCopyAll').addEventListener('click', copyWAll);
-  $('#wRound').addEventListener('change', changeWRound);
+  if ($('#wClearAll')) $('#wClearAll').addEventListener('click', clearWAll);
   document.addEventListener('keydown', (e) => {
     const d = $('#wDrawer');
     if (e.key === 'Escape' && d && !d.hidden) closeWeights();

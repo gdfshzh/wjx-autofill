@@ -62,7 +62,7 @@
           <i></i>
           <span>每轮随机</span>
         </label>
-        <label>次数 <input id="bcount" type="number" min="1" max="200" value="3"></label>
+        <label>次数 <input id="bcount" type="number" min="1" max="5000" value="3"></label>
         <label>间隔 <input id="bgap" type="number" min="0" max="7200" value="60"><i>s</i></label>
         <label class="dproxy">代理 <input id="proxy" type="text" placeholder="可空" spellcheck="false"></label>
         <span class="dspacer"></span>
@@ -180,18 +180,15 @@
     <button class="btn xs" id="wClose">关闭</button>
   </div>
   <p class="dr-tip">
-    配置按「轮次 + 题目」独立保存，互不影响。已配置的题目在该轮按概率抽取；
-    未配置的题目沿用控制坞里的「每轮随机」开关。带补充填写的选项，
-    文本在「模板配置」里按选项配，概率只决定选哪个选项。
+    一次配置对整批生效。填的是每个选项在全部轮次里的出现比例，
+    代码按控制坞的「次数」换算出精确次数（400 轮 70% 就是 280 次），
+    不需要逐轮设置。带补充填写的选项，文本在「模板配置」里按选项配。
   </p>
 
   <div class="w-roundbar">
-    <label>轮次 <input id="wRound" type="number" min="1" max="999" value="1"></label>
-    <span class="w-roundhint" id="wRoundHint">—</span>
+    <span class="w-roundhint" id="wRoundHint">按控制坞的「次数」换算，一次配置对整批生效</span>
     <span class="w-spacer"></span>
-    <button class="btn xs" id="wCopyNext">复制到下一轮</button>
-    <button class="btn xs" id="wCopyAll">套用到全部</button>
-    <button class="btn xs" id="wClearRound">清空本轮</button>
+    <button class="btn xs" id="wClearAll">清空全部配置</button>
   </div>
 
   <div class="w-body">

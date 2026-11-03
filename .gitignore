@@ -45,3 +45,6 @@ waFRzBR/
 
 # 发布说明草稿，内容已随 Release 发布
 _release_notes_*.md
+
+# 概率配置的 v1 结构备份，仅供迁移核对
+choice_weights.v1.backup.json

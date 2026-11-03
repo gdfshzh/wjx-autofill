@@ -1,49 +1,40 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-choice_weights.py —— 选择题「按轮次 × 题目 × 选项」概率配置与抽样
+"""choice_weights.py —— 选择题概率配置（全局一份，按总轮数精确配额）
 
-与 server.py 解耦：这里只负责校验、归一化、抽样、预览，不碰 HTTP 与文件布局。
-server.py 负责把配置落盘到 choice_weights.json，并把轮次号传进来。
+v2 起配置不再按轮次分开：一道题只有一份配置，对所有轮次生效。
+保存时只记目标概率，开跑时按「次数」换算出每轮取什么值。
 
 数据结构（choice_weights.json）
 {
-  "version": 1,
+  "version": 2,
   "sig": "问卷指纹 survey_sig()",
-  "updated": "2026-11-02 17:20:00",
-  "rounds": {
-    "1": {
-      "3": {                                  # topic
-        "v": 1,
-        "sig": "题目选项指纹",                 # 选项集合变了就整条失效
-        "mode": "single",                     # single|multi_target|multi_weight|matrix
-        "weights": {"1": 0.5, "2": 0.3, "3": 0.2},
-        "count": null                         # 仅多选：固定选几项，null=按题干约束
-      }
-    },
-    "2": { ... }
+  "updated": "2026-11-03 13:10:00",
+  "items": {
+    "8": {
+      "v": 2,
+      "sig": "题目选项指纹",
+      "mode": "multi_target",
+      "weights": {"1": 0.7, "2": 0.6, "3": 0.3},
+      "count": null
+    }
   }
 }
 
-轮次之间不共享对象，复制出来的配置也是深拷贝，改第 2 轮不会动第 1 轮。
-未配置的题目/轮次不在这里出现，调用方回落到原来的均匀随机逻辑。
+精确配额（quota.py）
+  目标概率 × 总轮数 = 每个选项该出现多少次，四舍五入后按最大余数法补齐，
+  再均匀散布到 N 轮、整体洗牌。400 轮设 70% 就是 280 次，不是「大约 280」。
 
-四种抽样语义
-  single       单选/下拉：weights 归一化后就是各选项出现概率
-  multi_target 多选：weights 是每个选项的「目标出现概率」。
-               在满足限项约束的全部选项组合上做 IPF（迭代比例拟合），
-               使每个选项的边缘出现概率贴近目标值，再按组合分布抽样。
-               选项数 > MULTI_ENUM_MAX 时退化为 multi_weight。
-  multi_weight 多选：weights 是相对权重，先按题干约束定项数 n，
-               再做「按权重不放回抽样」，适合只要求倾向性、不要求精确边缘分布的场景。
-  matrix       矩阵量表：weights 是分值 1..N 的分布，每个子项独立抽一次。
+四种语义
+  single       单选/下拉：weights 归一化后即各选项出现概率
+  multi_target 多选：weights 是每个选项的目标出现概率（0-1），
+               总和等于平均选中项数
+  multi_weight 多选：weights 是相对权重，按平均项数换算成目标概率
+  matrix       矩阵量表：weights 是分值 1..N 的分布，每行独立配额
 
 复杂度
-  single/matrix  O(选项数) / 次
-  multi_weight   O(选项数 log 选项数) / 次
-  multi_target   预处理 O(2^m · m · 迭代数)，m ≤ 12 时组合数 ≤ 4095；
-                 抽样 O(组合数) / 次。拟合结果按 (m, lo, hi, 目标值) 缓存，
-                 同一配置在多轮里只算一次。
+  配额在开跑前一次算完，O(N · 选项数)，运行时取值为 O(1)。
+  多选分配是贪心 + 尾部修正，O(N · m log m)。
 """
 
 import hashlib
@@ -52,8 +43,11 @@ import math
 import os
 import random
 import time
+from collections import Counter
 
-VERSION = 1
+from quota import QuotaPlan
+
+VERSION = 2
 CHOICE_TYPES = ("单选", "多选", "矩阵量表", "下拉")
 MULTI_ENUM_MAX = 12       # 组合枚举上限，超过改用 multi_weight，避免 2^20 卡死
 FIT_ITERS = 120
@@ -261,12 +255,14 @@ def validate_config(q, cfg, normalize=True):
 
     # multi_target：weights 是目标出现概率
     if max(weights.values()) > 1.0000001:
-        # 兼容直接传百分数的调用方：全都不超过 100 就按百分比解释
-        if max(weights.values()) <= 100.0000001:
+        # 全部大于 1 才认为是百分数输入（70/20/10 这种）。
+        # 只要有小于 1 的混在里面，说明是 0-1 写法里有一项填错了，
+        # 此时把 1.5 当成 1.5% 会静默吞掉错误，必须报出来。
+        if min(weights.values()) > 1.0000001 and max(weights.values()) <= 100.0000001:
             warns.append("检测到百分比输入，已按 0-100% 换算")
             weights = {k: v / 100.0 for k, v in weights.items()}
         else:
-            errs.append("目标出现概率不能超过 100%")
+            errs.append("目标出现概率必须在 0-100% 之间（用小数写法时不超过 1）")
             return {}, errs, warns
 
     p = dict(weights)
@@ -510,145 +506,169 @@ def sample_question(q, cfg, rng=None):
 
 
 # ---------------------------------------------------------------- 轮次装配
-def build_round_samplers(survey, store, sig, rounds):
-    """把整份配置编译成 {轮次: {topic: QuestionSampler}}。
+def build_plans(survey, store, sig, rounds):
+    """把配置编译成 {topic: QuotaPlan}，一份配置覆盖全部轮次。
+
+    配额在开跑前一次算完，之后每轮直接取值，不再抽样 ——
+    所以界面显示的「预计次数」和实际提交的次数必然一致。
 
     任何一层对不上（问卷指纹、题目指纹、选项值、题型）都跳过并记一条 issue，
     不抛异常：一份过期的配置不应该让整轮任务起不来。
     """
     out, issues = {}, []
-    if not store or not store.get("rounds"):
-        return out, issues
+    items = (store or {}).get("items") or {}
+    if not items:
+        return out, []
     if store.get("sig") and store.get("sig") != sig:
         issues.append("概率配置属于另一份问卷（指纹不一致），本次全部不套用")
         return out, issues
 
+    rounds = max(1, int(rounds))
     qmap = {str(q.get("topic")): q for q in survey.get("questions") or []}
-    for r in range(1, max(1, int(rounds)) + 1):
-        rconf = (store.get("rounds") or {}).get(str(r)) or {}
-        if not isinstance(rconf, dict):
-            issues.append(f"第 {r} 轮配置格式不对，已跳过")
+    for topic, cfg in items.items():
+        topic = str(topic)
+        q = qmap.get(topic)
+        if not q:
+            issues.append(f"Q{topic} 已不在问卷里，跳过")
             continue
-        for topic, cfg in rconf.items():
-            q = qmap.get(str(topic))
-            if not q:
-                issues.append(f"第 {r} 轮 Q{topic} 已不在问卷里，跳过")
+        if not isinstance(cfg, dict):
+            issues.append(f"Q{topic} 配置不是对象，跳过")
+            continue
+        if cfg.get("sig") and cfg["sig"] != question_sig(q):
+            issues.append(f"Q{topic} 的选项已变，跳过该题配置")
+            continue
+        try:
+            clean, errs, warns = validate_config(q, cfg, normalize=True)
+            if errs:
+                issues.append(f"Q{topic} 配置无效：{errs[0]}")
                 continue
-            if not isinstance(cfg, dict):
-                issues.append(f"第 {r} 轮 Q{topic} 配置不是对象，跳过")
-                continue
-            if cfg.get("sig") and cfg["sig"] != question_sig(q):
-                issues.append(f"第 {r} 轮 Q{topic} 的选项已变，跳过该题配置")
-                continue
-            try:
-                clean, errs, warns = validate_config(q, cfg, normalize=True)
-                if errs:
-                    issues.append(f"第 {r} 轮 Q{topic} 配置无效：{errs[0]}")
-                    continue
-                for w in warns:
-                    issues.append(f"第 {r} 轮 Q{topic}：{w}")
-                out.setdefault(r, {})[str(topic)] = QuestionSampler(q, clean)
-            except Exception as e:
-                # 手工改坏的 JSON 不应该让整轮任务起不来
-                issues.append(f"第 {r} 轮 Q{topic} 配置读取失败：{type(e).__name__}: {e}")
+            for w in warns:
+                issues.append(f"Q{topic}：{w}")
+            out[topic] = QuotaPlan(q, clean, rounds)
+        except Exception as e:
+            issues.append(f"Q{topic} 配置读取失败：{type(e).__name__}: {e}")
     return out, issues
 
 
 def config_stats(store):
-    """给接口/前端用的统计：轮次数、配置处数、涉及题目数。"""
-    rounds = (store or {}).get("rounds") or {}
-    pairs = 0
-    topics = set()
-    for r, items in rounds.items():
-        if not isinstance(items, dict):
-            continue
-        for t in items:
-            pairs += 1
-            topics.add(str(t))
+    """给接口/前端用的统计：配置了几道题。"""
+    items = (store or {}).get("items") or {}
+    topics = [str(t) for t in items if isinstance(items.get(t), dict)]
     return {
-        "configured_rounds": sorted(int(r) for r in rounds if str(r).isdigit()),
-        "pairs": pairs,
+        "pairs": len(topics),
         "questions": sorted(topics, key=lambda x: int(x) if x.isdigit() else 0),
+        # 字段保留，v2 不再有轮次维度，前端读到空数组即可
+        "configured_rounds": [],
     }
 
 
 # ---------------------------------------------------------------- 预览
-def preview_question(q, cfg, samples=800, seed=None):
-    """按实际抽样器跑 samples 次，返回经验分布与目标分布。
+def preview_question(q, cfg, rounds=100, seed=None):
+    """按 rounds 轮生成精确配额，返回每选项的次数与占比。
 
-    前端画的是「真实抽样结果」，不是把权重直接当概率画 —— 多选在限项
-    约束下两者并不相等，直接画权重会让人误以为配置没生效。
+    「实际」不是抽样估计，是按配额算出来的确定值 ——
+    400 轮 70% 直接显示 280 次，不会因为随机波动显示成 276。
     """
-    samples = max(50, min(int(samples or 800), 5000))
-    sampler = QuestionSampler(q, cfg)
-    rng = random.Random(seed) if seed is not None else random.Random()
+    rounds = max(1, min(int(rounds or 100), 20000))
+    # 先归一化：前端传的是草稿，单选/矩阵的 weights 可能是 70/20/10 这种
+    # 相对权重，不归一化的话 target 会和 actual（0-1）差两个数量级
+    clean, _errs, _warns = validate_config(q, cfg, normalize=True)
+    if clean:
+        cfg = clean
+    rng = random.Random(seed) if seed is not None else None
+    plan = QuotaPlan(q, cfg, rounds, rng)
     vals = [v for v, _ in question_values(q)]
-    counts = {v: 0 for v in vals}
-    count_hist = {}
-    cells = 0
+    counts = plan.counts()
 
-    for _ in range(samples):
-        val = sampler.draw(rng)
-        if isinstance(val, list):
-            for x in val:
-                counts[str(x)] = counts.get(str(x), 0) + 1
-            cells += len(val)
-            count_hist[len(val)] = count_hist.get(len(val), 0) + 1
-        else:
-            counts[str(val)] = counts.get(str(val), 0) + 1
-            cells += 1
+    hist = {}
+    for item in plan.items():
+        n = len(item) if isinstance(item, list) else 1
+        hist[n] = hist.get(n, 0) + 1
 
-    # 多选的「出现概率」分母是轮次数（每个选项每轮最多出现一次），
-    # 不是所有被勾选格子的总数 —— 用后者会把 80% 显示成 40%。
-    denom = samples if q.get("type_name") == "多选" else max(1, cells)
-    actual = {v: counts.get(v, 0) / denom for v in vals}
+    is_multi = (q.get("type_name") == "多选"
+                or str(cfg.get("mode") or "").startswith("multi"))
+    rows = len((q.get("matrix") or {}).get("rows") or [])
+    if is_multi:
+        denom = rounds
+    elif rows:
+        denom = rounds * rows
+    else:
+        denom = rounds
+
+    actual = {v: counts.get(v, 0) / max(1, denom) for v in vals}
+
     target = None
     if cfg.get("mode") in ("single", "matrix", "multi_target"):
         target = {v: float((cfg.get("weights") or {}).get(v, 0.0)) for v in vals}
 
-    fit_err = None
-    if cfg.get("mode") == "multi_target":
-        lo, hi = multi_bounds(q, cfg.get("count"))
-        probs = {v: float((cfg.get("weights") or {}).get(v, 0.0)) for v in vals}
-        fit = _fit_for(q, lo, hi, probs)
-        fit_err = round(fit[2], 6) if fit else None
+    err = None
+    if target:
+        err = max(abs(actual.get(v, 0.0) - target.get(v, 0.0)) for v in vals)
 
+    cells = sum(counts.values())
     return {
         "mode": cfg.get("mode"),
-        "samples": samples,
+        "rounds": rounds,
+        "samples": rounds,               # 兼容旧字段名
         "values": vals,
         "texts": {v: t for v, t in question_values(q)},
+        "counts": {v: counts.get(v, 0) for v in vals},
         "actual": actual,
         "target": target,
-        "mean_count": round(cells / samples, 3),
-        "count_hist": {str(k): v for k, v in sorted(count_hist.items())},
-        "fit_error": fit_err,
+        "mean_count": round(cells / rounds, 3),
+        "count_hist": {str(k): v for k, v in sorted(hist.items())},
+        "fit_error": round(err, 6) if err is not None else None,
+        "exact": True,
     }
 
 
 # ---------------------------------------------------------------- 文件读写
 def empty_store():
-    return {"version": VERSION, "sig": "", "updated": "", "rounds": {}}
+    return {"version": VERSION, "sig": "", "updated": "", "items": {}}
 
 
 def load_store(path):
-    """读配置。文件不存在/损坏都返回空结构，不阻断服务启动。"""
+    """读配置。文件不存在/损坏都返回空结构，不阻断服务启动。
+
+    v1 的 rounds 结构会自动迁移：同一题在多个轮次配了不同值时，
+    取出现次数最多的那一份（平票取靠前的轮次）。
+    """
     if not os.path.exists(path):
         return empty_store()
     try:
         data = json.load(open(path, encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("顶层不是对象")
-        data.setdefault("version", VERSION)
         data.setdefault("sig", "")
-        data.setdefault("rounds", {})
         data.setdefault("updated", "")
-        if not isinstance(data["rounds"], dict):
-            data["rounds"] = {}
-        else:
-            # 手工改坏时可能把某一轮写成数组/字符串，先把这一层清掉
-            data["rounds"] = {k: v for k, v in data["rounds"].items()
-                              if isinstance(v, dict)}
+
+        items = data.get("items")
+        if not isinstance(items, dict):
+            items = {}
+        items = {str(k): v for k, v in items.items() if isinstance(v, dict)}
+
+        legacy = data.get("rounds")
+        if isinstance(legacy, dict) and legacy:
+            merged = {}
+            for r in sorted(legacy, key=lambda x: int(x) if str(x).isdigit() else 0):
+                conf = legacy[r]
+                if not isinstance(conf, dict):
+                    continue
+                for t, cfg in conf.items():
+                    if isinstance(cfg, dict):
+                        merged.setdefault(str(t), []).append(cfg)
+            for t, lst in merged.items():
+                if t in items:
+                    continue
+                keys = [json.dumps([c.get("mode"), c.get("weights"), c.get("count")],
+                                   sort_keys=True, ensure_ascii=False) for c in lst]
+                most = Counter(keys).most_common(1)[0][0]
+                items[t] = lst[keys.index(most)]
+            data["migrated_from"] = f"v1（{len(legacy)} 轮）"
+
+        data["items"] = items
+        data["version"] = VERSION
+        data.pop("rounds", None)
         return data
     except Exception:
         return empty_store()
