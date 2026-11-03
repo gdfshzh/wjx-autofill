@@ -141,100 +141,94 @@ HTTP 状态码：400 参数错误，500 内部错误。
 
 ## 选项概率
 
+v2 起一道题只有一份配置，对整批轮次生效，接口里不再有 `round`。
+
 ### GET /api/weights
 
 ```json
 {
   "ok": true,
+  "version": 2,
   "sig": "6827c3c49210",
   "current_sig": "6827c3c49210",
   "stale": false,
-  "rounds": {
-    "1": {
-      "8": {
-        "mode": "multi_target",
-        "weights": {"1": 0.7, "2": 0.6, "3": 0.3},
-        "count": null,
-        "sig": "1d4fd549b6"
-      }
+  "items": {
+    "8": {
+      "mode": "multi_target",
+      "weights": {"1": 0.7, "2": 0.6, "3": 0.3, "4": 0.2},
+      "count": null,
+      "sig": "1d4fd549b6"
     }
   },
   "pairs": 1,
-  "configured_rounds": [1],
-  "questions": ["8"]
+  "questions": ["8"],
+  "configured_rounds": [],
+  "updated": "2026-11-03 13:20:00"
 }
 ```
 
 `stale=true` 表示配置属于另一份问卷，运行时会被忽略。
+`configured_rounds` 为兼容旧前端保留，v2 恒为空数组。
 
 ### POST /api/weights
-
-三种 `action`。
 
 **保存单题**
 
 ```json
 {
   "action": "set",
-  "round": 2,
   "topic": "8",
   "config": {
     "mode": "multi_target",
-    "weights": {"1": 0.7, "2": 0.6, "3": 0.3},
+    "weights": {"1": 0.7, "2": 0.6, "3": 0.3, "4": 0.2},
     "count": null
   }
 }
 ```
 
-`config` 为空或 `cleared: true` 等于删除该轮该题。
+`config` 为空或 `clear: true` 等于删除该题。
 
 **清除**
 
 ```json
-{"action": "clear", "round": 2, "topic": "8"}
-{"action": "clear", "round": 2}
+{"action": "clear", "topic": "8"}
 {"action": "clear", "all": true}
 ```
 
-**复制**
-
-```json
-{"action": "copy", "from": 1, "to": [2, 3]}
-{"action": "copy", "from": 1, "to": "all", "count": 5}
-{"action": "copy", "from": 1, "topic": "8", "to": "all", "count": 5}
-```
-
-带 `topic` 时只复制该题，目标轮次的其他题保持不变。不带 `topic` 是整轮复制，走深拷贝。
-
-所有写操作都会返回完整的配置对象，前端直接用返回值重建列表。
+返回完整的 `items` 与统计，前端直接用返回值重建列表。
 
 ### POST /api/weights/preview
 
-按草稿或已存配置跑蒙特卡洛，对比目标与实际。
+按指定轮数算一次配额，返回每项的**确定次数**（不是抽样估计）。
 
 ```json
 {
   "topic": "8",
   "config": {"mode": "multi_target", "weights": {"1": 0.7, "2": 0.6}},
-  "samples": 600
+  "rounds": 400
 }
 ```
 
-不传 `config` 时按 `round + topic` 读已存配置。
+不传 `config` 时读已存配置；不传 `rounds` 时取当前任务的次数，再没有按 100 估。
 
 ```json
 {
   "ok": true,
-  "target": {"1": 0.7, "2": 0.6},
-  "actual": {"1": 0.697, "2": 0.598},
-  "mean_count": 1.99,
-  "count_hist": {"1": 1146, "2": 1731, "3": 1123},
-  "fit_error": 0.000099,
+  "rounds": 400,
+  "counts": {"1": 280, "2": 240, "3": 120, "4": 80},
+  "actual": {"1": 0.7, "2": 0.6, "3": 0.3, "4": 0.2},
+  "mean_count": 1.8,
+  "count_hist": {"1": 80, "2": 320},
+  "fit_error": 0.0,
+  "exact": true,
   "warnings": []
 }
 ```
 
-多选的 `actual` 分母是轮次数，不是勾选格总数。
+- `counts` 是整批里每个选项出现多少次；
+- `actual` 是 `counts / rounds`，多选的分母是轮次数；
+- `fit_error` 为与目标的最大偏差，配额模式下恒为 0（四舍五入除外）；
+- `exact: true` 标识这是配额而非蒙特卡洛估计。
 
 ---
 
