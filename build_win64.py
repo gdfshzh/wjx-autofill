@@ -21,7 +21,7 @@ r"""生成 Windows 免安装版（自带 Python，目标机器不用装任何东
 为什么 exe 要套一层解压：158 MB 解一遍 5~8 秒，每次都解会覆盖用户解析好的
 survey.json。所以只解一次、按版本号判断，升级时保留数据文件。
 
-作者：黄智皓
+作者：Richard Huang
 本项目完全免费，禁止商用和学术造假
 """
 
@@ -65,7 +65,7 @@ cd /d "%~dp0"
 echo.
 echo   ============================================
 echo     问卷星批量作答控制台
-echo     作者：黄智皓
+echo     作者：Richard Huang
 echo     本项目完全免费，禁止商用和学术造假
 echo   ============================================
 echo.
@@ -90,7 +90,7 @@ if not "%CODE%"=="0" (
 """
 
 README_TXT = """问卷星批量作答控制台 —— 便携版
-作者：黄智皓
+作者：Richard Huang
 本项目完全免费，禁止商用和学术造假
 
 【怎么用】
@@ -299,7 +299,7 @@ def main():
             print(f"      {os.path.basename(p):<32} {os.path.getsize(p) / 1048576:6.1f} MB")
     print(f"      {DIST_DIR}")
     print()
-    print("作者：黄智皓    本项目完全免费，禁止商用和学术造假")
+    print("作者：Richard Huang    本项目完全免费，禁止商用和学术造假")
     return 0
 
 

@@ -159,7 +159,7 @@ def force_utf8():
 
 ```
 修复前  字节 b'\xd5\xe2\xd2\xbb\xd0\xd0...'     按 UTF-8 读 → ��һ�������ģ�����
-修复后  字节 b'\xe8\xbf\x99\xe4\xb8\x80\xe8\xa1...' 按 UTF-8 读 → 这一行是中文：作者 黄智皓
+修复后  字节 b'\xe8\xbf\x99\xe4\xb8\x80\xe8\xa1...' 按 UTF-8 读 → 这一行是中文：作者 Richard Huang
 ```
 
 ### 提交「假成功」

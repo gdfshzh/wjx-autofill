@@ -48,3 +48,6 @@ _release_notes_*.md
 
 # 概率配置的 v1 结构备份，仅供迁移核对
 choice_weights.v1.backup.json
+
+# 本地截图，不入库
+_ui_*.png

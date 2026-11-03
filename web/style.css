@@ -267,6 +267,21 @@ main {
 .mono { font-family: Consolas, monospace; font-size: 11.5px; color: var(--dim); }
 .dround { flex: none; }
 
+/* 总体完成百分比，紧跟在轮次后面；不占「当前题」的位置 */
+.dpct {
+  flex: none; font-size: 10.5px; color: #5f646c;
+  min-width: 32px; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* 剩余时长靠右，与左侧状态拉开距离 */
+.deta {
+  margin-left: auto; flex: none; padding-left: 12px;
+  font-size: 10.5px; color: #6f747c; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.dock.live .deta { color: #7ea6da; }
+.dock.done .deta { color: #57c98a; }
+
 /* 当前题：跟随浏览器正在点的那道题，与答题区高亮同源 */
 .dnow {
   font-size: 11.5px; color: #7b8088;
@@ -276,15 +291,25 @@ main {
 .dock.live .dnow { color: #8fbcf5; }
 
 .dbar {
-  height: 3px; background: #1b1c1f; border-radius: 2px;
-  margin: 7px 0 8px; overflow: hidden;
+  height: 6px; background: #1b1c1f; border-radius: 3px;
+  margin: 8px 0 9px; overflow: hidden; position: relative;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.35);
 }
 .dbar > div {
-  height: 100%; width: 0; border-radius: 2px;
+  height: 100%; width: 0; border-radius: 3px;
   background: linear-gradient(90deg, #3d86e0, #6fb0ff);
-  transition: width .25s ease;
+  transition: width .4s ease;
+  position: relative; overflow: hidden;
 }
+/* 运行时补一道斜向流光，一眼能看出还在推进；静止时不动，避免干扰阅读 */
+.dock.live .dbar > div::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.3), transparent);
+  animation: dflow 1.5s linear infinite;
+}
+@keyframes dflow { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
 .dock.warn .dbar > div { background: linear-gradient(90deg, #b8802a, #e0b055); }
+.dock.done .dbar > div { background: linear-gradient(90deg, #2f8f5b, #57c98a); }
 
 .dctl { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .dctl label {

@@ -21,7 +21,7 @@
     wjx_probe_offline.pyz     离线版，python 直接跑
     启动.bat                  双击入口，自动选上面两个里存在的那个
 
-作者：黄智皓
+作者：Richard Huang
 本项目完全免费，禁止商用和学术造假
 """
 
@@ -84,7 +84,7 @@ setlocal enabledelayedexpansion
 echo.
 echo   ============================================
 echo     问卷星批量作答控制台
-echo     作者：黄智皓
+echo     作者：Richard Huang
 echo     本项目完全免费，禁止商用和学术造假
 echo   ============================================
 echo.
@@ -409,7 +409,7 @@ def main():
     print(f"      python {os.path.basename(target_for_check)}")
     print(f"      或双击 {os.path.basename(OUT_BAT)}")
     print()
-    print("作者：黄智皓    本项目完全免费，禁止商用和学术造假")
+    print("作者：Richard Huang    本项目完全免费，禁止商用和学术造假")
     return 0
 
 

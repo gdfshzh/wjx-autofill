@@ -60,11 +60,11 @@ WEIGHT_PATH = os.path.join(HERE, "choice_weights.json")
 # ---------------------------------------------------------------- 项目信息
 # 单文件版与散装版共用这一份，前端弹窗从 /api/about 取，不在页面里写死多份
 APP_NAME = "问卷星批量作答控制台"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 
 # 单批最大轮数：配额按这个值换算次数，上限只防误输入
 MAX_ROUNDS = 5000
-AUTHOR = "黄智皓"
+AUTHOR = "Richard Huang"
 AUTHOR_NOTE = "本项目完全免费，禁止商用和学术造假"
 ABOUT = {
     "app": APP_NAME,
@@ -133,6 +133,11 @@ class State:
             "qtext": "",
             "captcha": False,
             "captcha_mode": "",   # auto=脚本正在点  manual=需要人工点
+            # 进度与剩余时长：started_at 是整批开始的时间戳，
+            # done_rounds 是已经完整跑完的轮数，前端据此算总体进度和 ETA
+            "started_at": 0.0,
+            "round_started_at": 0.0,
+            "done_rounds": 0,
         }
 
         # 填空题模板：{topic: [候选1, 候选2, ...]}，空列表表示该题不走模板
@@ -506,7 +511,9 @@ def run_browser_engine(shortid, survey, rounds, count, gap, proxy, headless, slo
     total_q = len(survey.get("questions") or [])
     with LOCK:
         S.browser_state.update(running=True, phase="opening", current=0,
-                               total=total_q, captcha=False, qtext="")
+                               total=total_q, captcha=False, qtext="",
+                               started_at=time.time(), round_started_at=0.0,
+                               done_rounds=0)
 
     ok = fail = 0
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -558,10 +565,16 @@ def run_browser_engine(shortid, survey, rounds, count, gap, proxy, headless, slo
             if line.startswith("[第") and "打开" in line:
                 m2 = re.search(r"第 (\d+)/(\d+) 轮", line)
                 with LOCK:
+                    rn = int(m2.group(1)) if m2 else 1
+                    rtotal = int(m2.group(2)) if m2 else 1
                     bs.update(running=True, phase="opening",
-                              round=int(m2.group(1)) if m2 else 1,
-                              rounds=int(m2.group(2)) if m2 else 1,
-                              current=0, captcha=False)
+                              round=rn, rounds=rtotal,
+                              current=0, captcha=False,
+                              # 上一轮已经结束，落盘成已完成轮数
+                              done_rounds=max(0, rn - 1),
+                              round_started_at=time.time())
+                    if not bs.get("started_at"):
+                        bs["started_at"] = time.time()
             elif "· 点击 Q" in line:
                 m2 = re.search(r"点击 Q(\d+)", line)
                 if m2:
@@ -584,6 +597,12 @@ def run_browser_engine(shortid, survey, rounds, count, gap, proxy, headless, slo
             elif "结果 {" in line:
                 with LOCK:
                     bs.update(phase="done", captcha=False, current=total_q)
+            elif "已处理" in line and "轮]" in line:
+                with LOCK:
+                    # 一轮走完（成功或失败都算），推进已完成轮数
+                    bs.update(done_rounds=max(bs.get("done_rounds", 0),
+                                              bs.get("round", 0)),
+                              current=total_q)
             elif "轮间隔" in line:
                 with LOCK:
                     bs.update(phase="waiting", captcha=False)
@@ -1405,7 +1424,9 @@ class Handler(BaseHTTPRequestHandler):
             S.quick_running = True
             # 立刻进入「准备中」，否则前端在新任务的头几百毫秒里还画着上一次的结果
             S.browser_state.update(running=True, phase="opening", current=0,
-                                   round=0, rounds=0, captcha=False)
+                                   round=0, rounds=0, captcha=False,
+                                   started_at=time.time(), round_started_at=0.0,
+                                   done_rounds=0)
         threading.Thread(target=quick_worker, args=(body,), daemon=True).start()
         return self._json({"ok": True})
 

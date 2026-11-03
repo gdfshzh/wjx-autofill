@@ -1552,14 +1552,58 @@ function buildView(q, b) {
 
   if (b.rounds) round = `${b.round || 0}/${b.rounds}`;
 
+  // ---- 总体进度：已完成轮数 + 当前轮内进度
+  // 浏览器模式用 browser_state，HTTP 批量用 quick/status 里的 round/total
+  let rTotal = b.rounds || 0;
+  let rDone = b.done_rounds || 0;
+  if (!rTotal && q.total) {
+    rTotal = q.total;
+    rDone = q.round || 0;
+  }
+  let roundFrac = 0;
+  if (b.phase === 'filling' && total) {
+    roundFrac = Math.min(1, (b.current || 0) / total);
+  } else if (['submitting', 'waiting', 'done'].includes(b.phase)) {
+    roundFrac = 1;
+  }
+  let overall = rTotal ? Math.min(1, (rDone + roundFrac) / rTotal) : 0;
+  if (phase === 'done') overall = 1;
+  // 还没开始跑的时候，进度条不该留着上一次的残值
+  if (!busy && phase !== 'done') overall = 0;
+
+  // ---- 剩余时长：用已花时间除以已完成比例反推剩余
+  // 进度低于 0.5% 时推算值会剧烈跳动，干脆先不显示
+  let etaText = '';
+  if (busy && b.started_at && overall > 0.005 && overall < 1) {
+    const elapsed = Date.now() / 1000 - b.started_at;
+    if (elapsed > 0) etaText = fmtRemain(elapsed / overall * (1 - overall));
+  }
+
   return {
     phase, text, now, pct, round, busy,
+    overall,
+    // 刚开跑时 0.03% 四舍五入成 0% 会让人以为没动，直接标 <1%
+    pctText: overall > 0
+      ? (overall < 0.01 ? '<1%' : `${Math.round(overall * 100)}%`)
+      : '',
+    etaText,
     captchaMode: b.captcha_mode || '',
     cls: ['captcha', 'fail'].includes(phase) ? 'warn'
       : (phase === 'done' ? 'done'
         : (busy ? 'live' : '')),
     liveTopic: (phase === 'filling' && b.current) ? b.current : 0,
   };
+}
+
+/** 把秒数写成「剩余 X 分 Y 秒」。超过一小时才进位。 */
+function fmtRemain(sec) {
+  if (!Number.isFinite(sec) || sec < 0) return '';
+  if (sec < 60) return `剩余 ${Math.max(1, Math.round(sec))} 秒`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  if (m < 60) return s ? `剩余 ${m} 分 ${s} 秒` : `剩余 ${m} 分`;
+  const h = Math.floor(m / 60);
+  return `剩余 ${h} 小时 ${m % 60} 分`;
 }
 
 /* ---------------------------------------------------------------- 渲染控制坞 */
@@ -1573,7 +1617,14 @@ function renderDock(v) {
   nowEl.textContent = v.now;
   nowEl.title = v.now;      // 错误信息较长时靠 hover 看全文
   $('#bround').textContent = v.round;
-  $('#bfill').style.width = (v.pct || 0) + '%';
+  $('#bfill').style.width = ((v.overall || 0) * 100).toFixed(1) + '%';
+  const pctEl = $('#bpct');
+  if (pctEl) pctEl.textContent = v.pctText || '';
+  const etaEl = $('#beta');
+  if (etaEl) {
+    etaEl.textContent = v.etaText || '';
+    etaEl.title = v.etaText ? '按已完成的轮次推算，实际会受验证码和轮间隔影响' : '';
+  }
 
   const cap = $('#bcap');
   cap.hidden = v.phase !== 'captcha';

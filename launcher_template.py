@@ -14,7 +14,7 @@
     python wjx_probe_all_in_one.py --reset-data     连 survey.json 与模板一起重置
     python wjx_probe_all_in_one.py --clean          清掉运行时（保留问卷与模板）后退出
 
-作者：黄智皓
+作者：Richard Huang
 本项目完全免费，禁止商用和学术造假
 """
 
@@ -30,8 +30,8 @@ import sys
 import zipfile
 
 APP_NAME = "问卷星批量作答控制台"
-APP_VERSION = "1.4.0"
-AUTHOR = "黄智皓"
+APP_VERSION = "1.4.1"
+AUTHOR = "Richard Huang"
 NOTICE = "本项目完全免费，禁止商用和学术造假"
 
 # 打包时替换成压缩后的项目快照（base64 的 zip）

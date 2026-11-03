@@ -8,7 +8,7 @@ setlocal enabledelayedexpansion
 echo.
 echo   ============================================
 echo     问卷星批量作答控制台
-echo     作者：黄智皓
+echo     作者：Richard Huang
 echo     本项目完全免费，禁止商用和学术造假
 echo   ============================================
 echo.

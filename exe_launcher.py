@@ -17,7 +17,7 @@ survey.json。所以解一次、记版本号，升级时只覆盖代码并把数
     --doctor        只做环境自检（转给 run.py doctor）
     --rebuild       删掉版本标记，强制重解压一次
 
-作者：黄智皓
+作者：Richard Huang
 本项目完全免费，禁止商用和学术造假
 """
 
@@ -26,12 +26,12 @@ import subprocess
 import sys
 import zipfile
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 
 BANNER = """
   ============================================
     问卷星批量作答控制台
-    作者：黄智皓
+    作者：Richard Huang
     本项目完全免费，禁止商用和学术造假
   ============================================
 """
