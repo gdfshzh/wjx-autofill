@@ -178,6 +178,28 @@ python run.py par --job "OOHKkG8:3" --workers 3   # 并行作答
 
 ---
 
+## 自动更新
+
+每次启动 3 秒后查一次 GitHub 上的最新 Release，版本号比当前大就弹窗：
+
+```text
+发现新版本 v1.5.0
+当前 v1.4.1 · 最新 v1.5.0
+[更新说明正文]
+[稍后提醒]  [更新]
+```
+
+- **更新**：下载新版 exe 到同目录 `.new`，生成替换批处理，本进程退出后由批处理
+  覆盖并重启。问卷数据与配置保留（`survey.json`、`choice_weights.json`、
+  `fill_template.json` 不在覆盖范围内）。
+- **稍后提醒**：记进 `localStorage`，同一版本不再打扰，下个版本出现时再提示。
+
+只对 exe / 便携版生效。源码运行时点「更新」会提示改用 `git pull`，
+因为当前进程占着文件，无法自我替换。
+
+查询失败（离线、限流、超时）只记一条日志，不影响启动和使用。
+接口见 [docs/API.md](docs/API.md)，结果缓存 10 分钟。
+
 ## 接口
 
 本地 HTTP 服务，前端与后端之间走 JSON。
@@ -195,6 +217,8 @@ python run.py par --job "OOHKkG8:3" --workers 3   # 并行作答
 | POST | `/api/weights/preview` | 按配置跑蒙特卡洛预览 |
 | GET/POST | `/api/fill/template` | 填空与联动模板 |
 | GET | `/api/survey/export` | 题目文本 |
+| GET | `/api/update/check` | 查最新 Release，比对版本 |
+| POST | `/api/update/apply` | 下载并安排重启替换 |
 
 完整请求体、返回结构、示例见 [docs/API.md](docs/API.md)。
 
@@ -231,6 +255,12 @@ PATH 里没有可用的 Python，或命中的是 Microsoft Store 那个 0 字节
 **点「停止」没反应**
 
 停止会直接 `terminate` 浏览器子进程，2 秒内生效。如果异常发生在浏览器启动之前，状态位会卡在 running，1.3.0 之后已加 `finally` 复位与接口兜底。
+
+**某道题填不进去会怎样**
+
+脚本会立即停手，不再作答后续题目，也不提交，同时弹窗告诉你是哪道题、哪一行、什么原因
+（例如「Q21 · 第 7/16 行 · 矩阵量表：第 7 行点击后未选中（目标 5，实际 无），
+行标题：可以传承与发扬红色文化」）。整批任务一并中断，后续轮次全部取消。
 
 **怎么判断提交成功**
 
@@ -288,6 +318,8 @@ python -m pip install beautifulsoup4 lxml playwright curl_cffi
 
 | 版本 | 主要变更 |
 |---|---|
+| 1.4.2 | 矩阵填写失败立即中止并弹窗说明位置；启动时检查更新，支持一键更新 |
+| 1.4.1 | 署名统一为 Richard Huang；控制坞新增总体进度与剩余时长 |
 | 1.4.0 | 选项概率改为全局配置 + 按总轮数精确配额，去掉逐轮设置；轮数上限提到 5000 |
 | 1.3.1 | 修复打包版子进程 `import console` 失败 |
 | 1.3.0 | 联动选项：选完选项再补充填写 |

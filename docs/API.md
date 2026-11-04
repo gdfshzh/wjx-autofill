@@ -284,6 +284,52 @@ v2 起一道题只有一份配置，对整批轮次生效，接口里不再有 `
 
 ---
 
+## 更新
+
+### GET /api/update/check
+
+查 GitHub 最新 Release 并比对版本号。结果缓存 10 分钟，`?force=1` 跳过缓存。
+
+```json
+{
+  "ok": true,
+  "current": "1.4.2",
+  "latest": "1.4.1",
+  "has_update": false,
+  "notes": "Release 说明正文",
+  "url": "https://github.com/gdfshzh/wjx-autofill/releases/tag/v1.4.1",
+  "assets": [
+    {"name": "wjx_probe_win64.exe", "size": 73280490, "url": "https://..."}
+  ],
+  "error": ""
+}
+```
+
+版本比较按数字元组（`(1,4,2) > (1,4,1)`），不是字符串比大小。
+网络不通、限流、超时时 `error` 有值、`has_update` 为 false，不抛异常 ——
+更新检查失败不能影响程序启动。
+
+### POST /api/update/apply
+
+下载最新 exe 并在本进程退出后替换重启。
+
+```json
+{"ok": true, "version": "1.4.2", "size": 73280490}
+```
+
+流程：下载到 `<exe>.new` → 写 `_update.bat`（GBK，与 `chcp 936` 对齐）→
+`os.startfile` 启动批处理 → 2 秒后 `os._exit(0)` → 批处理覆盖 exe 并启动新版。
+
+返回 400 的情况：
+
+- 已是最新版本；
+- 源码运行（`sys.frozen` 为假），此时附带 `url` 提示去 Releases 下载；
+- 最新版本没有 exe 附件。
+
+下载失败或文件小于 1 MB 返回 500。
+
+---
+
 ## 日志
 
 ### GET /api/batch/status?since=N
