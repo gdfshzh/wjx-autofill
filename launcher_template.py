@@ -30,7 +30,7 @@ import sys
 import zipfile
 
 APP_NAME = "问卷星批量作答控制台"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 AUTHOR = "Richard Huang"
 NOTICE = "本项目完全免费，禁止商用和学术造假"
 

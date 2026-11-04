@@ -82,6 +82,52 @@
   </section>
 </main>
 
+<!-- 无法填写：中止并说明具体位置，避免误提交后才发现 -->
+<div class="about-mask" id="abortMask">
+  <div class="about warn" role="alertdialog" aria-modal="true">
+    <div class="about-top">
+      <span class="about-mark warn">!</span>
+      <div class="about-title">
+        <h2>这道题填不进去，已停止</h2>
+        <p class="about-sub" id="abortWhere">—</p>
+      </div>
+    </div>
+    <p class="abort-prompt" id="abortPrompt"></p>
+    <div class="abort-reason" id="abortReason"></div>
+    <p class="about-note">
+      本批任务已中断，后续轮次全部取消，没有提交任何答卷。
+      修好后再点「开始作答」即可，不需要重开程序。
+    </p>
+    <div class="about-foot">
+      <button class="btn primary" id="abortOk">知道了</button>
+    </div>
+  </div>
+</div>
+
+<!-- 发现新版本 -->
+<div class="about-mask" id="updateMask">
+  <div class="about" role="dialog" aria-modal="true">
+    <div class="about-top">
+      <span class="about-mark">↑</span>
+      <div class="about-title">
+        <h2>发现新版本 <span id="updateVer"></span></h2>
+        <p class="about-sub">
+          当前 v<span id="updateCur"></span> · 最新 v<span id="updateLatest"></span>
+        </p>
+      </div>
+    </div>
+    <pre class="update-notes" id="updateNotes"></pre>
+    <p class="about-note">
+      点「更新」会下载新版程序并自动重启，问卷数据与配置保留。
+      源码运行时无法自我替换，会提示改用 git pull。
+    </p>
+    <div class="about-foot">
+      <button class="btn" id="updateLater">稍后提醒</button>
+      <button class="btn primary" id="updateNow">更新</button>
+    </div>
+  </div>
+</div>
+
 <footer class="logbar">
   <div class="log-head">
     <span>运行日志</span>

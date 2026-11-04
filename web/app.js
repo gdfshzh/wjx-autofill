@@ -15,6 +15,7 @@ const state = {
   busy: false,          // 合成后的「正在运行」
   liveTopic: 0,         // 浏览器正在填的题号，与答题区高亮同源
   phase: 'idle',
+  lastAbort: '',        // 已经弹过窗的中止位置，避免每次轮询都弹
 };
 
 /* ---------------------------------------------------------------- 网络 */
@@ -1398,6 +1399,9 @@ function syncRandTag() {
 }
 
 async function startRun() {
+  // 新任务从头开始：上一轮的中止记录要清掉，否则同一道题再次失败时
+  // 会被「已经弹过」的判断挡住，反而不提示
+  state.lastAbort = '';
   const shortid = $('#shortid').value.trim();
   if (!shortid && !qrBase64) {
     toast('先填短链，或上传一张二维码图片', true);
@@ -1581,6 +1585,7 @@ function buildView(q, b) {
 
   return {
     phase, text, now, pct, round, busy,
+    abort: b.abort || null,
     overall,
     // 刚开跑时 0.03% 四舍五入成 0% 会让人以为没动，直接标 <1%
     pctText: overall > 0
@@ -1738,6 +1743,99 @@ async function tick() {
   if (v.phase === 'fail' && !['fail', 'stopped'].includes(prevPhase)) {
     toast(v.now, true);
   }
+  // 结构性中止：同一位置只弹一次，后续轮询不再打扰
+  if (v.abort && v.abort.where !== state.lastAbort) {
+    state.lastAbort = v.abort.where;
+    showAbort(v.abort);
+  }
+}
+
+/* ---------------------------------------------------------------- 中止弹窗 */
+function showAbort(ab) {
+  const mask = $('#abortMask');
+  if (!mask) return;
+  $('#abortWhere').textContent =
+    `${ab.where || ('Q' + ab.topic)}${ab.type_name ? ' · ' + ab.type_name : ''}`;
+  $('#abortPrompt').textContent = ab.prompt ? `题干：${ab.prompt}` : '';
+  $('#abortPrompt').hidden = !ab.prompt;
+  $('#abortReason').textContent = ab.reason || '未知原因';
+  mask.classList.add('show');
+}
+
+function closeAbort() {
+  const mask = $('#abortMask');
+  if (mask) mask.classList.remove('show');
+}
+
+/* ---------------------------------------------------------------- 自动更新 */
+let updateInfo = null;
+
+async function checkUpdate() {
+  try {
+    const r = await api('/api/update/check');
+    if (!r || !r.ok || r.error || !r.has_update) return;
+    // 用户点过「稍后提醒」，同一个版本不再打扰
+    if (localStorage.getItem('wjx.skipVersion') === r.latest) return;
+    updateInfo = r;
+    showUpdate(r);
+  } catch (e) { /* 离线、限流都不影响使用 */ }
+}
+
+function showUpdate(info) {
+  $('#updateVer').textContent = `v${info.latest}`;
+  $('#updateCur').textContent = info.current || '';
+  $('#updateLatest').textContent = info.latest || '';
+  const notes = (info.notes || '').trim();
+  $('#updateNotes').textContent = notes.slice(0, 600);
+  $('#updateMask').classList.add('show');
+}
+
+function closeUpdate() {
+  const mask = $('#updateMask');
+  if (mask) mask.classList.remove('show');
+}
+
+async function applyUpdate() {
+  const btn = $('#updateNow');
+  const later = $('#updateLater');
+  btn.disabled = true;
+  later.disabled = true;
+  btn.textContent = '下载中…';
+  try {
+    const r = await post('/api/update/apply', {});
+    if (!r.ok) {
+      toast(r.error || '更新失败', true);
+      btn.disabled = false;
+      later.disabled = false;
+      btn.textContent = '更新';
+      return;
+    }
+    btn.textContent = '正在重启…';
+    $('#updateNotes').textContent =
+      `v${r.version} 已下载（${(r.size / 1048576).toFixed(1)} MB），程序正在重启替换…`;
+    await waitRestart();
+  } catch (e) {
+    toast('更新请求失败，请检查网络', true);
+    btn.disabled = false;
+    later.disabled = false;
+    btn.textContent = '更新';
+  }
+}
+
+/** 服务端会主动退出，等它重新起来再刷新页面。 */
+async function waitRestart() {
+  for (let i = 0; i < 40; i++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    try {
+      const r = await api('/api/about');
+      if (r && r.ok) {
+        location.reload();
+        return;
+      }
+    } catch (e) { /* 还没起来，继续等 */ }
+  }
+  $('#updateNotes').textContent =
+    '没有等到程序自动恢复。请手动关掉窗口，重新打开程序即可完成更新。';
 }
 
 /* 日志：唯一还依赖 /api/batch/status 的东西 */
@@ -1889,6 +1987,29 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeAbout();
   if (e.key === 'Escape') closeSurveyText();
 });
+
+// 中止弹窗与更新弹窗
+if ($('#abortOk')) $('#abortOk').addEventListener('click', closeAbort);
+if ($('#abortMask')) {
+  $('#abortMask').addEventListener('click', (e) => {
+    if (e.target.id === 'abortMask') closeAbort();
+  });
+}
+if ($('#updateLater')) {
+  $('#updateLater').addEventListener('click', () => {
+    if (updateInfo) localStorage.setItem('wjx.skipVersion', updateInfo.latest);
+    closeUpdate();
+    toast(`已跳过 v${updateInfo ? updateInfo.latest : ''}，下次启动再提醒`);
+  });
+}
+if ($('#updateNow')) $('#updateNow').addEventListener('click', applyUpdate);
+if ($('#updateMask')) {
+  $('#updateMask').addEventListener('click', (e) => {
+    if (e.target.id === 'updateMask') closeUpdate();
+  });
+}
+// 启动后延迟查一次：等启动声明弹窗先关掉，别两个框叠在一起
+setTimeout(checkUpdate, 3000);
 
 initRandSwitch();
 initWeights();

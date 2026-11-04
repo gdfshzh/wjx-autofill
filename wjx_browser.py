@@ -407,6 +407,36 @@ class Human:
                          vp["height"] * random.uniform(.2, .75))
 
 
+class FillError(Exception):
+    """某道题填不进去。
+
+    和普通异常的差别：它带「哪道题、哪一行、为什么」，上层拿到后应当
+    立即中止整轮（而不是重试到超时），并把位置原样报给界面。
+    """
+
+    def __init__(self, topic, reason, prompt="", type_name="", row=0, total_rows=0):
+        self.topic = topic
+        self.reason = reason
+        self.prompt = prompt or ""
+        self.type_name = type_name or ""
+        self.row = row
+        self.total_rows = total_rows
+        super().__init__(reason)
+
+    def to_dict(self):
+        where = (f"Q{self.topic} · 第 {self.row}/{self.total_rows} 行"
+                 if self.row else f"Q{self.topic}")
+        return {
+            "topic": self.topic,
+            "prompt": self.prompt[:80],
+            "type_name": self.type_name,
+            "row": self.row,
+            "total_rows": self.total_rows,
+            "reason": self.reason,
+            "where": where,
+        }
+
+
 class WjxBrowser:
     """按题型驱动整份问卷。"""
 
@@ -423,6 +453,9 @@ class WjxBrowser:
         # 必答题里没填上的题号。和 errors 分开记：errors 是「点了但抛异常」，
         # 这里还包括「压根没有答案可填」。提交前必须看这个，否则点了也是白点。
         self.missing_required = []
+        # 结构性失败（某题怎么都填不进去）。有值就中止本轮，不再往下填，
+        # 也不提交 —— 继续填只会把后面的题也拖成必答缺失。
+        self.fatal = None
 
     # ------------------------------------------------------ 题型分派
     def fill_all(self, answers: dict, option_texts: dict = None):
@@ -451,7 +484,17 @@ class WjxBrowser:
                 continue
 
             texts = option_texts.get(topic) or option_texts.get(int(topic)) or {}
-            ok = self._with_retry(q, val, texts)
+            try:
+                ok = self._with_retry(q, val, texts)
+            except FillError as e:
+                # 立即停手：后面的题不再填，也不提交。
+                # 继续填下去只会把剩下每一道必答题都变成「缺失」，
+                # 错误信息反而被稀释，看不出真正出问题的是哪一题。
+                self.fatal = e
+                d = e.to_dict()
+                self.h.log(f"  ✗ {d['where']} 无法填写：{e.reason}")
+                self.h.log("  ✗ 已停止填写本份问卷，后续题目不再作答，也不会提交")
+                break
             self.done.append(topic if ok else f"{topic}(fail)")
             if not ok and q["required"]:
                 self.missing_required.append(topic)
@@ -481,6 +524,10 @@ class WjxBrowser:
         for attempt in range(self.retry + 1):
             try:
                 self._answer_one(q, val, texts)
+            except FillError:
+                # 结构性错误（表格没渲染、行数对不上、点了不生效），
+                # 重试同一个动作不会有不同结果，直接抛给上层中止
+                raise
             except Exception as e:
                 msg = f"Q{topic} 第{attempt + 1}次失败: {type(e).__name__}: {str(e)[:90]}"
             else:
@@ -565,24 +612,63 @@ class WjxBrowser:
 
     # ------------------------------------------------------ 矩阵
     def _matrix(self, topic: int, scores):
-        """矩阵量表：每行点一个 a[dval=分值]，行与行之间停一下。"""
-        rows = self.page.locator(f"#div{topic} tr[tp='d']")
+        """矩阵量表：每行点一个 a[dval=分值]，点完立刻回读该行。
+
+        矩阵在页面底部，滚动不到位时表格可能还没渲染；直接拿空 locator
+        去点，bounding_box() 返回 None，报出来的错是「第 1 行无评分格」，
+        看不出真实原因。这里先等表格出现，再核对行数，逐行点逐行验。
+        """
+        q = next((x for x in (self.survey.get("questions") or [])
+                  if str(x.get("topic")) == str(topic)), None)
+        prompt = (q or {}).get("prompt") or ""
+        sel = f"#div{topic} tr[tp='d']"
+
+        try:
+            self.page.wait_for_selector(sel, timeout=8000)
+        except Exception:
+            raise FillError(
+                topic, f"矩阵表格未渲染：8 秒内没等到 {sel}，可能是页面没加载完或被折叠",
+                prompt, "矩阵量表")
+
+        rows = self.page.locator(sel)
         n = rows.count()
         if n == 0:
-            n = len(scores)
-        # 这一行是给前端的进度用的：没有它，矩阵题不会推进 current，
-        # 进度条会永远停在倒数第二题
+            raise FillError(topic, "矩阵表格存在但没有数据行（tr[tp=d] 为 0）",
+                            prompt, "矩阵量表")
+        if n != len(scores):
+            raise FillError(
+                topic,
+                f"页面渲染 {n} 行，答案给了 {len(scores)} 行，数量对不上"
+                f"（问卷可能改过题，或解析出来的行数与页面不一致）",
+                prompt, "矩阵量表", total_rows=n)
+
         self.h.log(f"    · 点击 Q{topic} 矩阵评分 {len(scores)} 行")
         for i, score in enumerate(scores):
-            if i >= n:
-                break
+            val = int(score)
             row = rows.nth(i)
-            cell = row.locator(f"a[dval='{int(score)}']").first
+
+            title = ""
+            try:
+                t = row.locator(".itemTitleSpan").first
+                if t.count():
+                    title = (t.inner_text() or "").strip()[:24]
+            except Exception:
+                pass
+
+            cell = row.locator(f"a[dval='{val}']").first
+            if not cell.count():
+                raise FillError(
+                    topic,
+                    f"第 {i+1} 行没有 dval={val} 的评分格"
+                    f"（该行只有 {row.locator('a[dval]').count()} 档）",
+                    prompt, "矩阵量表", row=i + 1, total_rows=n)
+
             box = cell.bounding_box()
             if not box:
-                raise RuntimeError(f"矩阵第 {i + 1} 行无评分格")
-            x = box["x"] + box["width"] * random.uniform(0.3, 0.7)
-            y = box["y"] + box["height"] * random.uniform(0.3, 0.7)
+                raise FillError(
+                    topic, f"第 {i+1} 行评分格拿不到坐标（不在可视区或被遮挡）",
+                    prompt, "矩阵量表", row=i + 1, total_rows=n)
+
             self.page.evaluate(
                 """el => { const r = el.getBoundingClientRect();
                      if (r.top < 90 || r.bottom > innerHeight - 90)
@@ -590,11 +676,24 @@ class WjxBrowser:
                 cell.element_handle(),
             )
             box = cell.bounding_box() or box
-            self.h.move_to(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            self.h.move_to(box["x"] + box["width"] / 2,
+                           box["y"] + box["height"] / 2)
             self.h._sleep(0.05, 0.18)
             self.page.mouse.down()
             self.h._sleep(0.04, 0.1)
             self.page.mouse.up()
+
+            # 点完立刻回读这一行：矩阵是给 a 加 class，坐标落偏、被浮层挡住、
+            # 前端拦下都不会抛异常，只有读回来才知道有没有真的选中
+            got = row.locator("a.rate-on").first
+            got_val = (got.get_attribute("dval") or "").strip() if got.count() else ""
+            if got_val != str(val):
+                raise FillError(
+                    topic,
+                    f"第 {i+1} 行点击后未选中（目标 {val}，实际 {got_val or '无'}）"
+                    + (f"，行标题：{title}" if title else ""),
+                    prompt, "矩阵量表", row=i + 1, total_rows=n)
+
             if (i + 1) % 3 == 0:
                 self.h.idle(0.2, 0.8)
 
@@ -796,6 +895,12 @@ class WjxBrowser:
         return missing
 
     def submit(self, timeout: int = 60) -> dict:
+        # 结构性失败优先报：这时后面一堆题都是缺的，先给根因
+        if self.fatal:
+            d = self.fatal.to_dict()
+            return {"ok": False, "abort": d,
+                    "msg": f"{d['where']} 无法填写：{d['reason']}（已中止，未提交）"}
+
         # 提交前自检：必答题没填上就别点，点了也必然被打回，
         # 而打回之后页面 URL 不变，很容易被误记成成功
         if self.missing_required:
@@ -923,6 +1028,9 @@ def run_once(p, args, survey, answers, option_texts=None, idx=1, total=1):
             else:
                 r = {"ok": False, "msg": "页面显示完成但没有答卷编号，按失败计"}
 
+        if r.get("abort"):
+            # 单独一行给父进程解析：界面据此弹窗，说明是哪一题哪一行
+            print("[ABORT] " + json.dumps(r["abort"], ensure_ascii=False), flush=True)
         print(f"[第 {idx}/{total} 轮] 结果 {r}", flush=True)
         # 父进程按这行 JSON 统计，不再靠字符串匹配 dict 的 repr
         print("[RESULT] " + json.dumps(r, ensure_ascii=False), flush=True)
@@ -1019,6 +1127,10 @@ def main():
                     ok_n += 1
                 else:
                     fail_n += 1
+                if r.get("abort"):
+                    print("[中止] 该题原理上填不进去，后续轮次全部取消，避免继续产生无效答卷",
+                          flush=True)
+                    break
             except Exception as e:
                 fail_n += 1
                 print(f"[第 {i} 轮] 异常 {type(e).__name__}: {str(e)[:120]}", flush=True)

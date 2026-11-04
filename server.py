@@ -19,10 +19,13 @@ import mimetypes
 import os
 import random
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -60,7 +63,7 @@ WEIGHT_PATH = os.path.join(HERE, "choice_weights.json")
 # ---------------------------------------------------------------- 项目信息
 # 单文件版与散装版共用这一份，前端弹窗从 /api/about 取，不在页面里写死多份
 APP_NAME = "问卷星批量作答控制台"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 
 # 单批最大轮数：配额按这个值换算次数，上限只防误输入
 MAX_ROUNDS = 5000
@@ -138,6 +141,9 @@ class State:
             "started_at": 0.0,
             "round_started_at": 0.0,
             "done_rounds": 0,
+            # 结构性中止：某题原理上填不进去时由子进程上报，
+            # 前端读到这里就弹窗说明位置和原因，不再让人对着日志猜
+            "abort": None,
         }
 
         # 填空题模板：{topic: [候选1, 候选2, ...]}，空列表表示该题不走模板
@@ -267,6 +273,72 @@ def load_weights():
         # v1 的按轮次配置已合并成全局一份，告知用户行为变了
         S.log(f"概率配置已从 {store['migrated_from']} 结构迁移到 v2："
               f"同一道题在多个轮次配了不同值时，取出现次数最多的那份", "info")
+
+
+# ---------------------------------------------------------------- 自动更新
+UPDATE_REPO = "gdfshzh/wjx-autofill"
+UPDATE_CACHE_TTL = 600          # 10 分钟，避免每次刷新页面都去打 GitHub API
+_UPDATE_CACHE = {"ts": 0.0, "data": None}
+
+# 替换用的批处理：等本进程退出 → 覆盖 exe → 启动新版本。
+# 用 GBK 写盘，与 chcp 936 对齐，中文提示才不会变成乱码。
+UPDATE_BAT = """@echo off
+chcp 936 >nul
+title 更新中
+timeout /t 2 /nobreak >nul
+cd /d "%~dp0"
+move /y "{EXE}.new" "{EXE}" >nul 2>&1
+if errorlevel 1 (
+  echo.
+  echo   替换失败：请手动把 {EXE}.new 改名为 {EXE}
+  echo.
+  pause
+  exit /b 1
+)
+start "" "{EXE}"
+del "%~f0"
+"""
+
+
+def parse_version(text):
+    """v1.4.1 → (1, 4, 1)。解析不出来返回空元组，比较时视为最旧。"""
+    nums = re.findall(r"\d+", str(text or ""))
+    return tuple(int(x) for x in nums[:4]) if nums else ()
+
+
+def fetch_latest_release(timeout=8, force=False):
+    """查 GitHub 最新 Release。
+
+    网络不通、限流、超时都只返回 error 字段，不抛异常 ——
+    更新检查失败不能影响程序启动。
+    """
+    now = time.time()
+    if (not force and _UPDATE_CACHE["data"]
+            and now - _UPDATE_CACHE["ts"] < UPDATE_CACHE_TTL):
+        return _UPDATE_CACHE["data"]
+
+    out = {"current": APP_VERSION, "latest": "", "has_update": False,
+           "notes": "", "url": "", "assets": [], "error": ""}
+    url = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+    try:
+        req = urllib.request.Request(url, headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"wjx-probe/{APP_VERSION}",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read())
+        out["latest"] = str(data.get("tag_name") or "").lstrip("vV")
+        out["notes"] = (data.get("body") or "")[:1500]
+        out["url"] = data.get("html_url") or ""
+        out["assets"] = [{"name": a.get("name"), "size": a.get("size"),
+                          "url": a.get("browser_download_url")}
+                         for a in (data.get("assets") or [])]
+        out["has_update"] = parse_version(out["latest"]) > parse_version(APP_VERSION)
+    except Exception as e:
+        out["error"] = f"读取发布信息失败：{type(e).__name__}: {str(e)[:80]}"
+
+    _UPDATE_CACHE.update(ts=now, data=out)
+    return out
 
 
 def weights_snapshot():
@@ -529,6 +601,16 @@ def run_browser_engine(shortid, survey, rounds, count, gap, proxy, headless, slo
             # 结构化结果行。父进程按 JSON 统计，不再匹配 dict 的 repr ——
             # 之前用 "结果 {'ok': True" 做子串匹配，格式一变统计就全错，
             # 结果「提交失败」也被算成成功。
+            if line.startswith("[ABORT]"):
+                try:
+                    ab = json.loads(line[len("[ABORT]"):].strip())
+                except Exception:
+                    ab = {"reason": line[len("[ABORT]"):].strip(), "where": "未知位置"}
+                with LOCK:
+                    bs.update(phase="abort", abort=ab, captcha=False)
+                S.log(f"中止 · {ab.get('where', '')}：{ab.get('reason', '')}", "err")
+                continue
+
             if line.startswith("[RESULT]"):
                 try:
                     r = json.loads(line[len("[RESULT]"):].strip())
@@ -623,7 +705,8 @@ def run_browser_engine(shortid, survey, rounds, count, gap, proxy, headless, slo
             S.browser_state.update(running=False, captcha=False)
             # done 要保留进度（界面显示「共 N 题已提交」），其余收尾时清干净，
             # 否则下次一进来就看到上一轮的 current=1、rounds=3
-            if S.browser_state["phase"] != "done":
+            # abort 和 done 一样要保留：界面靠它弹窗，清掉就只剩一句「已停止」
+            if S.browser_state["phase"] not in ("done", "abort"):
                 S.browser_state.update(phase="idle", current=0, round=0, rounds=0)
         try:
             os.remove(ans_path)
@@ -1075,6 +1158,10 @@ class Handler(BaseHTTPRequestHandler):
                 "title": (S.survey or {}).get("title") or "",
                 **st,
             })
+        if path == "/api/update/check":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            force = (q.get("force") or ["0"])[0] == "1"
+            return self._json({"ok": True, **fetch_latest_release(force=force)})
         if path == "/api/about":
             # 前端启动弹窗的内容来源；作者与授权只在这里维护一份
             return self._json({"ok": True, **ABOUT})
@@ -1103,6 +1190,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._api_start(body)
         if p == "/api/quick/start":
             return self._api_quick_start(body)
+        if p == "/api/update/apply":
+            return self._api_update_apply(body)
         if p == "/api/quick/stop":
             return self._api_quick_stop()
         if p == "/api/fill/template":
@@ -1415,6 +1504,71 @@ class Handler(BaseHTTPRequestHandler):
         ).start()
         return self._json({"ok": True})
 
+    def _api_update_apply(self, body):
+        """下载最新 exe 并安排重启替换。
+
+        只有打包运行（sys.frozen）能自我替换：当前进程占着 exe，
+        必须先退出再由批处理覆盖。源码运行直接提示走 git pull。
+        """
+        info = fetch_latest_release(force=True)
+        if info.get("error"):
+            return self._json({"ok": False, "error": info["error"]}, 502)
+        if not info.get("has_update"):
+            return self._json({"ok": False,
+                               "error": f"当前已是最新版本（{info['current']}）"}, 400)
+
+        if not getattr(sys, "frozen", False):
+            return self._json({
+                "ok": False,
+                "error": "当前是源码运行，无法自动替换程序。"
+                         "请 git pull 拉取最新代码，或到 Releases 下载新版 exe",
+                "url": info.get("url") or "",
+            }, 400)
+
+        asset = next((a for a in info.get("assets") or []
+                      if str(a.get("name", "")).endswith(".exe")), None)
+        if not asset:
+            return self._json({"ok": False, "error": "最新版本没有 exe 附件"}, 400)
+
+        exe = os.path.abspath(sys.executable)
+        new_path = exe + ".new"
+        S.log(f"开始下载 v{info['latest']}"
+              f"（{(asset.get('size') or 0) / 1048576:.1f} MB）", "info")
+        try:
+            req = urllib.request.Request(asset["url"],
+                                         headers={"User-Agent": "wjx-probe"})
+            with urllib.request.urlopen(req, timeout=1800) as r, \
+                    open(new_path, "wb") as f:
+                shutil.copyfileobj(r, f, 1024 * 256)
+        except Exception as e:
+            try:
+                os.remove(new_path)
+            except Exception:
+                pass
+            return self._json({"ok": False,
+                               "error": f"下载失败：{type(e).__name__}: {str(e)[:80]}"}, 500)
+
+        size = os.path.getsize(new_path)
+        if size < 1024 * 1024:
+            return self._json({"ok": False,
+                               "error": f"下载到的文件只有 {size} 字节，不像完整程序"}, 500)
+
+        bat = os.path.join(os.path.dirname(exe), "_update.bat")
+        with open(bat, "w", encoding="gbk", errors="replace", newline="\r\n") as f:
+            f.write(UPDATE_BAT.replace("{EXE}", os.path.basename(exe)))
+
+        S.log(f"下载完成（{size / 1048576:.1f} MB），2 秒后重启替换", "ok")
+        try:
+            os.startfile(bat)
+        except Exception as e:
+            return self._json({"ok": False,
+                               "error": f"启动替换脚本失败：{type(e).__name__}: {e}；"
+                                        f"请手动运行 {bat}"}, 500)
+
+        # 留 2 秒把响应发出去，再退出让批处理接管
+        threading.Timer(2.0, lambda: os._exit(0)).start()
+        return self._json({"ok": True, "version": info["latest"], "size": size})
+
     def _api_quick_start(self, body):
         if S.quick_running:
             return self._json({"ok": False, "error": "任务正在进行中"}, 409)
@@ -1426,7 +1580,7 @@ class Handler(BaseHTTPRequestHandler):
             S.browser_state.update(running=True, phase="opening", current=0,
                                    round=0, rounds=0, captcha=False,
                                    started_at=time.time(), round_started_at=0.0,
-                                   done_rounds=0)
+                                   done_rounds=0, abort=None)
         threading.Thread(target=quick_worker, args=(body,), daemon=True).start()
         return self._json({"ok": True})
 

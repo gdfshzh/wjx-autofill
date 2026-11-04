@@ -941,6 +941,36 @@ main {
 .about-foot { display: flex; justify-content: flex-end; margin-top: 16px; }
 .about-foot .btn { min-width: 136px; }
 
+/* 中止 / 更新弹窗：复用 .about 的外壳，只换配色与内容块 */
+.about.warn { border-color: rgba(229,83,75,.42); }
+.about-mark.warn {
+  background: linear-gradient(150deg, #e5534b, #c4453d);
+  box-shadow: 0 4px 14px rgba(229,83,75,.32);
+}
+.abort-prompt {
+  margin: 14px 0 0;
+  font-size: 12.5px; line-height: 1.65; color: #cfd3d9;
+}
+.abort-reason {
+  margin: 10px 0 0; padding: 10px 12px;
+  background: rgba(229,83,75,.08);
+  border: 1px solid rgba(229,83,75,.3);
+  border-left: 3px solid var(--err);
+  border-radius: 6px;
+  font-size: 12px; line-height: 1.65; color: #e8a19c;
+  word-break: break-word;
+}
+.update-notes {
+  margin: 14px 0 0; max-height: 172px; overflow: auto;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--line); border-radius: 6px;
+  font-family: inherit; font-size: 11px; line-height: 1.65;
+  color: #9aa0a8; white-space: pre-wrap; word-break: break-word;
+}
+.update-notes:empty { display: none; }
+.about-foot { gap: 10px; }
+
 /* 日志栏常驻签名 */
 .log-head .sign {
   flex: 1;
