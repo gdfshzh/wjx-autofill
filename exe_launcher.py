@@ -166,8 +166,16 @@ def main():
         cmd = [py, target, "doctor"] + args
     else:
         cmd = [py, app] + args
+        # 端口以实际传入的为准：写死 8765 时用 --port 换端口，
+        # 这里提示的地址和真正监听的地址会对不上
+        port = "8765"
+        for i, a in enumerate(args):
+            if a == "--port" and i + 1 < len(args):
+                port = args[i + 1]
+            elif a.startswith("--port="):
+                port = a.split("=", 1)[1]
         say()
-        say("  启动服务，浏览器会自动打开 http://127.0.0.1:8765/")
+        say(f"  启动服务，浏览器会自动打开 http://127.0.0.1:{port}/")
         say("  关闭这个窗口即停止服务")
         say()
 
