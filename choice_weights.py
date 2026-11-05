@@ -77,7 +77,11 @@ def question_sig(q):
 
 
 def question_values(q):
-    """返回 [(value, text), ...]，value 一律转成字符串（与答案 JSON 对齐）。"""
+    """返回 [(value, text), ...]，value 一律转成字符串（与答案 JSON 对齐）。
+
+    矩阵的取值是分值 1..N（不是表头文案），必须和 quota.values_for 完全一致，
+    否则配额会算在一组页面上根本不存在的 key 上。
+    """
     if q.get("type_name") == "矩阵量表":
         scale = (q.get("matrix") or {}).get("scale") or []
         return [(str(i + 1), str(s)) for i, s in enumerate(scale)]

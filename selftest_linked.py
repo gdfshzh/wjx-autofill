@@ -17,7 +17,7 @@ import sys
 from parse_wjx import parse_html
 from wjx_autofill import build_submitdata
 from server import build_round_answers
-from choice_weights import empty_store, build_round_samplers, question_sig
+from choice_weights import build_plans, empty_store, question_sig
 
 HTML = """<!doctype html><html><head><title>联动题测试</title></head><body>
 <div id="divQuestion">
@@ -100,25 +100,24 @@ def main():
           build_submitdata(rounds[0], s, texts[0]) == "8$2^其他")
 
     print("4) 与概率配置衔接")
+    # v2 起一份配置覆盖全部轮次，不再按轮给不同权重；
+    # 这里验证「配额决定选项、文本跟着选项走」这条链没断。
     store = empty_store()
     store["sig"] = "sig-test"
-    store["rounds"] = {
-        "1": {"8": {"mode": "single", "weights": {"1": 1, "2": 0},
-                    "sig": question_sig(q8)}},
-        "2": {"8": {"mode": "single", "weights": {"1": 0, "2": 1},
-                    "sig": question_sig(q8)}},
-    }
-    samplers, issues = build_round_samplers(s, store, "sig-test", 2)
-    check("两轮抽样器装配成功", not issues and set(samplers) == {1, 2}, issues)
+    store["items"] = {"8": {"mode": "single", "weights": {"1": 1, "2": 0},
+                            "sig": question_sig(q8)}}
+    plans, issues = build_plans(s, store, "sig-test", 2)
+    check("配额方案装配成功", not issues and set(plans) == {"8"}, issues)
     rounds, _, _, texts = build_round_answers(
-        s, {"8": "1"}, {}, False, 2, False, samplers,
+        s, {"8": "1"}, {}, False, 2, False, plans,
         option_pools={"8": {"1": ["学校自组"], "2": ["其他机构"]}})
-    check("第1轮选项1配文本1",
-          rounds[0]["8"] == "1" and texts[0]["8"]["1"] == "学校自组", texts[0])
-    check("第2轮选项2配文本2",
-          rounds[1]["8"] == "2" and texts[1]["8"]["2"] == "其他机构", texts[1])
+    check("两轮都按配额选 1 并配文本1",
+          all(r["8"] == "1" and t["8"]["1"] == "学校自组"
+              for r, t in zip(rounds, texts)),
+          [(r["8"], t["8"]) for r, t in zip(rounds, texts)])
     check("概率不影响文本映射",
-          build_submitdata(rounds[1], s, texts[1]) == "8$2^其他机构")
+          build_submitdata(rounds[1], s, texts[1]) == "8$1^学校自组",
+          build_submitdata(rounds[1], s, texts[1]))
 
     print("5) 多选每轮取不同候选")
     rounds, _, _, texts = build_round_answers(

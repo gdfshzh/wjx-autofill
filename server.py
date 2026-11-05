@@ -63,7 +63,7 @@ WEIGHT_PATH = os.path.join(HERE, "choice_weights.json")
 # ---------------------------------------------------------------- 项目信息
 # 单文件版与散装版共用这一份，前端弹窗从 /api/about 取，不在页面里写死多份
 APP_NAME = "问卷星批量作答控制台"
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 
 # 单批最大轮数：配额按这个值换算次数，上限只防误输入
 MAX_ROUNDS = 5000
@@ -407,10 +407,13 @@ def batch_worker(answers, count, gap, think, proxy, shortid, survey, plans=None,
                 break
 
             # 配额方案在开跑前就算好了，这里按轮取确定值，不再是抽样。
-            # plans 为空时 round_answers 就是原答案。
+            # plans 为空时 round_answers 就是原答案；某题没算出配额时
+            # at() 返回 None，保留原答案（不能写成 None，否则该题等于没答）。
             round_answers = dict(answers)
             for t, plan in (plans or {}).items():
-                round_answers[t] = plan.at(i)
+                val = plan.at(i)
+                if val is not None:
+                    round_answers[t] = val
             round_texts = resolve_option_texts(
                 survey, round_answers, option_pools, manual_texts,
                 S.fill_random, text_bags)

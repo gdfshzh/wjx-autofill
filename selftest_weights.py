@@ -27,7 +27,7 @@ from choice_weights import (
     save_store,
     validate_config,
 )
-from quota import allocate, plan_multi, plan_single
+from quota import QuotaPlan, allocate, plan_multi, plan_single
 from server import build_round_answers
 
 TOTAL = 0
@@ -69,12 +69,19 @@ def multi_q(values=("1", "2", "3", "4"), topic=2, max_select=3):
 
 
 def matrix_q(topic=3, rows=3, scale=5):
+    """矩阵题夹具，字段与 parse_wjx.parse_matrix 的输出保持一致。
+
+    关键：矩阵题**没有 options**。表头刻度在 matrix.scale 里，提交值是
+    每行的分值 1..N。早先这个夹具手动塞了一份 options，正好掩盖了
+    QuotaPlan 用 q["options"] 取值的缺陷 —— 真实问卷解析出来 options 为空，
+    配额算在空集合上，每轮给 0 行，填写器直接报「页面 16 行，答案 0 行」。
+    夹具必须跟真实解析结果对齐，否则自检只能证明代码自洽。
+    """
     return {
         "topic": topic, "type": 6, "type_name": "矩阵量表", "required": True,
         "prompt": f"{topic}.矩阵",
         "matrix": {"rows": [f"行{i}" for i in range(rows)],
                    "scale": [str(i) for i in range(1, scale + 1)]},
-        "options": [{"value": str(i), "text": str(i)} for i in range(1, scale + 1)],
     }
 
 
@@ -132,6 +139,34 @@ cell = plan_single(["1", "2", "3", "4", "5"],
 c = Counter(cell)
 check("300 格 10/20/40/20/10 → 30/60/120/60/30",
       (c["1"], c["2"], c["3"], c["4"], c["5"]) == (30, 60, 120, 60, 30), dict(c))
+
+# 真实问卷的矩阵题只有 matrix.rows / matrix.scale，没有 options。
+# 这一段就是「YDmF2Wn Q21 报 0 行」的回归用例：取值必须来自 scale，
+# 每轮必须给够 16 行，否则填写器会以行数不符中止整批。
+mx16 = matrix_q(topic=21, rows=16, scale=5)
+mplan = QuotaPlan(mx16, {"mode": "matrix",
+                         "weights": {"1": 0.1, "2": 0.2, "3": 0.4,
+                                     "4": 0.2, "5": 0.1}}, 400, random.Random(9))
+check("矩阵无 options 时取值来自 scale",
+      mplan.values == ["1", "2", "3", "4", "5"], mplan.values)
+check("矩阵 400 轮每轮都是 16 行",
+      {len(mplan.at(i)) for i in range(1, 401)} == {16},
+      {len(mplan.at(i)) for i in range(1, 401)})
+mc = mplan.counts()
+check("矩阵 6400 格分布精确 10/20/40/20/10",
+      (mc["1"], mc["2"], mc["3"], mc["4"], mc["5"]) == (640, 1280, 2560, 1280, 640),
+      mc)
+
+# 没有 scale 就没有可分配的取值，此时宁可不出配额（返回 None 保留原答案），
+# 也不能编一个「每轮 1 行」的方案出来
+no_scale = matrix_q(rows=16)
+no_scale["matrix"]["scale"] = []
+nplan = QuotaPlan(no_scale, {"mode": "matrix", "weights": {"1": 1.0}}, 10)
+check("矩阵缺 scale 时不生成配额", nplan.at(1) is None, nplan.at(1))
+check("矩阵缺 scale 时每轮答案保留原样",
+      all(len(r["3"]) == 16 for r in
+          build_round_answers({"questions": [no_scale]}, {"3": [3] * 16},
+                              {}, False, 10, False, {"3": nplan})[0]))
 
 # ---------------------------------------------------------------- 2. 校验
 section("校验")

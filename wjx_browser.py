@@ -635,6 +635,22 @@ class WjxBrowser:
         if n == 0:
             raise FillError(topic, "矩阵表格存在但没有数据行（tr[tp=d] 为 0）",
                             prompt, "矩阵量表")
+        # 答案结构先过关再比行数。scores 可能是 [] 或 None 或字符串，
+        # 直接 len() 会报出「数量对不上」这种误导性结论 ——
+        # 真实原因是这题压根没生成答案，跟页面渲染毫无关系。
+        if scores is None or isinstance(scores, (str, bytes, dict)):
+            raise FillError(
+                topic,
+                f"答案格式不对：矩阵题需要每行一个分值，实际传进来的是 "
+                f"{type(scores).__name__}",
+                prompt, "矩阵量表", total_rows=n)
+        scores = list(scores)
+        if not scores:
+            raise FillError(
+                topic,
+                f"这道矩阵题没有生成答案（0 行，页面 {n} 行）——"
+                f"检查概率配置里 Q{topic} 的分值分布，或关掉该题的概率配置重跑",
+                prompt, "矩阵量表", total_rows=n)
         if n != len(scores):
             raise FillError(
                 topic,

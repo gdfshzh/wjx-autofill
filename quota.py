@@ -280,6 +280,20 @@ def plan_matrix(values, weights, rounds, rows, rng=None):
     return out
 
 
+def values_for(q):
+    """这道题可被抽到的取值列表。
+
+    矩阵量表在页面里没有 options：题目的「选项」是表头刻度（同意/一般…），
+    真正提交的是每行的分值 1..N。这里统一按分值编码，和前端
+    （web/app.js 里 matrix scale.map 出 value=i+1）以及 choice_weights
+    的 question_values 保持同一套编号，否则配额会算在空集合上。
+    """
+    if q.get("type_name") == "矩阵量表":
+        scale = (q.get("matrix") or {}).get("scale") or []
+        return [str(i + 1) for i in range(len(scale))]
+    return [str(o["value"]) for o in (q.get("options") or [])]
+
+
 class QuotaPlan:
     """把一份配额序列包装成按轮取值的对象。
 
@@ -292,7 +306,7 @@ class QuotaPlan:
         self.q = q
         self.cfg = cfg
         self.rounds = max(1, int(rounds))
-        self.values = [str(o["value"]) for o in (q.get("options") or [])]
+        self.values = values_for(q)
         self.mode = str(cfg.get("mode") or "single")
         self._seq = []
         self._build(rng)
@@ -308,7 +322,12 @@ class QuotaPlan:
 
         if self.mode == "matrix" or q.get("type_name") == "矩阵量表":
             rows = len((q.get("matrix") or {}).get("rows") or [])
-            self._seq = plan_matrix(vals, w, self.rounds, max(1, rows), rng)
+            if rows <= 0:
+                # 解析不到子项行数时不能瞎编：max(1, rows) 会给出每轮 1 个分值，
+                # 和页面 16 行对不上，填写器直接中止。这里留空，
+                # at() 返回 None，调用方保留原答案（随机填充的那 16 行）。
+                return
+            self._seq = plan_matrix(vals, w, self.rounds, rows, rng)
             return
 
         if self.mode in ("multi_target", "multi_weight") or q.get("type_name") == "多选":
@@ -345,9 +364,14 @@ class QuotaPlan:
         return (lo + hi) / 2.0
 
     def at(self, round_no):
-        """取第 round_no 轮（1 起）。超出范围时按余数循环。"""
+        """取第 round_no 轮（1 起）。超出范围时按余数循环。
+
+        没算出配额时返回 None 而不是 []：空列表会被当成「这题的答案就是空」，
+        矩阵题拿到 0 行会直接中止整批；None 表示「这题没有配额」，
+        调用方保留基础答案。
+        """
         if not self._seq:
-            return [] if self.mode != "single" else None
+            return None
         idx = (max(1, int(round_no)) - 1) % len(self._seq)
         return self._seq[idx]
 
@@ -356,7 +380,7 @@ class QuotaPlan:
         if round_no is not None:
             return self.at(round_no)
         if not self._seq:
-            return [] if self.mode != "single" else None
+            return None
         val = self._seq[self._idx % len(self._seq)]
         self._idx += 1
         return val
